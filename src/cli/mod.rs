@@ -136,6 +136,33 @@ pub enum Commands {
         datasource: Option<String>,
     },
 
+    /// Pre-aggregate views into rollup tables in the warehouse.
+    Build {
+        /// Path to config.yml.
+        #[arg(short, long)]
+        config: Option<PathBuf>,
+
+        /// Target schema name for pre-aggregated tables (default: AIRLAYER).
+        #[arg(long, default_value = "AIRLAYER")]
+        schema: String,
+
+        /// Which database to build against (default: first in config.yml).
+        #[arg(long)]
+        database: Option<String>,
+
+        /// Build only a specific view.
+        #[arg(long)]
+        view: Option<String>,
+
+        /// Print the CTAS statements without executing.
+        #[arg(long)]
+        dry_run: bool,
+
+        /// Path to globals file (optional).
+        #[arg(short, long)]
+        globals: Option<PathBuf>,
+    },
+
     /// List all views, dimensions, and measures.
     Inspect {
         /// Path to globals file (optional).
@@ -599,6 +626,24 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
                     std::process::exit(1);
                 }
             }
+        }
+
+        Commands::Build {
+            config,
+            schema,
+            database,
+            view,
+            dry_run,
+            globals,
+        } => {
+            run_build(
+                globals.as_ref(),
+                config.as_ref(),
+                &schema,
+                database.as_deref(),
+                view.as_deref(),
+                dry_run,
+            )?;
         }
 
         Commands::Inspect {
@@ -1341,6 +1386,149 @@ fn run_saved_query_execute(
             std::process::exit(1);
         }
     }
+}
+
+/// Build pre-aggregated rollup tables in the warehouse.
+fn run_build(
+    globals: Option<&PathBuf>,
+    config: Option<&PathBuf>,
+    schema: &str,
+    database: Option<&str>,
+    view_filter: Option<&str>,
+    dry_run: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use crate::engine::preagg;
+
+    let ctx = resolve_project_context(config)?;
+    let config_path = ctx
+        .config_path
+        .as_ref()
+        .ok_or("build requires a config.yml (auto-detected or via --config)")?;
+
+    // Check for schema override in config.yml
+    let content = std::fs::read_to_string(config_path)
+        .map_err(|e| format!("Failed to read config {}: {}", config_path.display(), e))?;
+    let partial: PartialConfig = serde_yaml::from_str(&content)
+        .map_err(|e| format!("Failed to parse config: {}", e))?;
+
+    let effective_schema = if schema != "AIRLAYER" {
+        schema.to_string() // CLI flag takes precedence
+    } else if let Some(ref pa) = partial.pre_aggregations {
+        pa.schema.clone().unwrap_or_else(|| "AIRLAYER".to_string())
+    } else {
+        "AIRLAYER".to_string()
+    };
+
+    let effective_database = database
+        .map(|s| s.to_string())
+        .or_else(|| partial.pre_aggregations.as_ref().and_then(|pa| pa.database.clone()));
+
+    let _dialects = build_dialect_map(ctx.config_path.as_ref(), None)?;
+    let parser = make_parser(globals)?;
+    let layer = load_from_directory(&parser, &ctx.base_dir)?;
+
+    // Resolve dialect from config
+    let dialect = if let Some(ref db_name) = effective_database {
+        let db_config = partial.databases.iter().find(|d| d.name == *db_name)
+            .ok_or_else(|| format!("Database '{}' not found in config", db_name))?;
+        Dialect::from_str(&db_config.db_type)
+            .ok_or_else(|| format!("Unknown dialect: {}", db_config.db_type))?
+    } else if let Some(first) = partial.databases.first() {
+        Dialect::from_str(&first.db_type)
+            .ok_or_else(|| format!("Unknown dialect: {}", first.db_type))?
+    } else {
+        return Err("No databases configured in config.yml".into());
+    };
+
+    let date_str = chrono::Local::now().format("%Y%m%d").to_string();
+
+    // Filter views if requested
+    let views: Vec<&crate::schema::models::View> = layer.views.iter()
+        .filter(|v| view_filter.map_or(true, |f| v.name == f))
+        .collect();
+
+    if views.is_empty() {
+        if let Some(name) = view_filter {
+            return Err(format!("View '{}' not found", name).into());
+        }
+        return Err("No views found".into());
+    }
+
+    // Collect all SQL statements
+    let mut all_stmts: Vec<String> = Vec::new();
+
+    // 1. Create schema/database
+    match dialect {
+        Dialect::ClickHouse => {
+            all_stmts.push(format!("CREATE DATABASE IF NOT EXISTS {}", effective_schema));
+        }
+        _ => {
+            all_stmts.push(format!("CREATE SCHEMA IF NOT EXISTS {}", effective_schema));
+        }
+    }
+
+    // 2. Create manifest table
+    all_stmts.push(preagg::generate_manifest_create_sql(&effective_schema, &dialect));
+
+    // 3. For each view, resolve rollups and generate CTAS + manifest entries
+    let mut manifest_entries: Vec<preagg::ManifestEntry> = Vec::new();
+    for view in &views {
+        let rollups = preagg::resolve_rollups(view);
+        for rollup in &rollups {
+            let ctas_stmts = preagg::generate_build_sql(view, rollup, &effective_schema, &date_str, &dialect);
+            all_stmts.extend(ctas_stmts);
+
+            let entry = preagg::build_manifest_entry(view, rollup, &effective_schema, &date_str);
+            all_stmts.push(preagg::generate_manifest_upsert_sql(&effective_schema, &entry, &dialect));
+            manifest_entries.push(entry);
+        }
+    }
+
+    if dry_run {
+        for stmt in &all_stmts {
+            println!("{};", stmt);
+            println!();
+        }
+        return Ok(());
+    }
+
+    // Execute against the warehouse
+    #[cfg(feature = "exec")]
+    {
+        let exec_config: crate::executor::ExecutionConfig =
+            serde_yaml::from_str(&content).map_err(|e| format!("Failed to parse config: {}", e))?;
+        let connection = if let Some(db_name) = &effective_database {
+            exec_config.find_connection(db_name)?
+        } else {
+            exec_config.first_connection()?
+        };
+
+        for (i, stmt) in all_stmts.iter().enumerate() {
+            eprintln!("[{}/{}] Executing...", i + 1, all_stmts.len());
+            crate::executor::execute(&connection, stmt, &[])
+                .map_err(|e| format!("Build statement {} failed: {}\nSQL: {}", i + 1, e, stmt))?;
+        }
+
+        eprintln!("Build complete: {} rollup(s) in schema '{}'", manifest_entries.len(), effective_schema);
+        // Output summary as JSON
+        let summary = serde_json::json!({
+            "status": "success",
+            "schema": effective_schema,
+            "rollups": manifest_entries.iter().map(|e| serde_json::json!({
+                "view": e.view_name,
+                "rollup": e.rollup_name,
+                "table": e.table_name,
+            })).collect::<Vec<_>>(),
+        });
+        println!("{}", serde_json::to_string_pretty(&summary).expect("serialize"));
+    }
+
+    #[cfg(not(feature = "exec"))]
+    {
+        return Err("build requires an exec-* feature flag to be enabled".into());
+    }
+
+    Ok(())
 }
 
 /// Compile-only path (no --execute). Prints raw SQL to stdout.
