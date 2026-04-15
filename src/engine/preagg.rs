@@ -403,6 +403,276 @@ pub fn generate_manifest_upsert_sql(
     )
 }
 
+/// Check if any rollup in the manifest covers the given query.
+/// Returns a reference to the first matching entry, or None if no rollup covers the query.
+pub fn check_coverage<'a>(
+    request: &crate::engine::query::QueryRequest,
+    rollups: &'a [LocalRollupEntry],
+) -> Option<&'a LocalRollupEntry> {
+    for entry in rollups {
+        if covers(request, entry) {
+            return Some(entry);
+        }
+    }
+    None
+}
+
+fn covers(request: &crate::engine::query::QueryRequest, entry: &LocalRollupEntry) -> bool {
+    // Extract view names from all member references
+    let query_views = request.referenced_views();
+
+    // All referenced views must match the rollup's single view
+    if !query_views.iter().all(|v| *v == entry.view_name) {
+        return false;
+    }
+
+    // Check dimensions: all requested dims must be in rollup dims
+    for dim in &request.dimensions {
+        let dim_name = dim.split('.').nth(1).unwrap_or(dim);
+        if !entry.dimensions.contains(&dim_name.to_string()) {
+            return false;
+        }
+    }
+
+    // Check measures: all requested measures must be in rollup measures (and not custom).
+    // Build (name, type) pairs in a single pass to avoid positional desync from filter_map.
+    let rollup_measures: Vec<(&str, &str)> = entry
+        .measures
+        .iter()
+        .filter_map(|m| {
+            let name = m.get("name").and_then(|n| n.as_str())?;
+            let mtype = m.get("type").and_then(|t| t.as_str()).unwrap_or("");
+            Some((name, mtype))
+        })
+        .collect();
+
+    for measure in &request.measures {
+        let measure_name = measure.split('.').nth(1).unwrap_or(measure);
+        if let Some(&(_, mtype)) = rollup_measures.iter().find(|(n, _)| *n == measure_name) {
+            // Reject if the stored type is custom (not pre-aggregable)
+            if mtype == "custom" {
+                return false;
+            }
+        } else {
+            // Measure not found in rollup at all
+            return false;
+        }
+    }
+
+    // Check time dimensions
+    for td in &request.time_dimensions {
+        let td_name = td.dimension.split('.').nth(1).unwrap_or(&td.dimension);
+        if entry.time_dimension.as_deref() != Some(td_name) {
+            return false;
+        }
+        // Granularity: requested must be same or coarser than stored granularity
+        if let Some(ref req_gran) = td.granularity {
+            if let Some(ref stored_gran) = entry.granularity {
+                if !is_coarser_or_equal(req_gran, stored_gran) {
+                    return false;
+                }
+            }
+        }
+    }
+
+    true
+}
+
+fn is_coarser_or_equal(requested: &str, stored: &str) -> bool {
+    let order = [
+        "second", "minute", "hour", "day", "week", "month", "quarter", "year",
+    ];
+    let req_idx = order.iter().position(|&g| g == requested);
+    let stored_idx = order.iter().position(|&g| g == stored);
+    match (req_idx, stored_idx) {
+        (Some(r), Some(s)) => r >= s,
+        _ => requested == stored,
+    }
+}
+
+/// Generate a DuckDB SQL query that reads from a Parquet file and re-aggregates.
+pub fn generate_reagg_sql(
+    request: &crate::engine::query::QueryRequest,
+    entry: &LocalRollupEntry,
+    parquet_path: &str,
+) -> String {
+    let mut select_cols: Vec<String> = Vec::new();
+    let mut group_by_cols: Vec<String> = Vec::new();
+
+    // 1. Dimensions
+    for dim in &request.dimensions {
+        let dim_name = dim.split('.').nth(1).unwrap_or(dim);
+        let alias = dim.replace('.', "__");
+        select_cols.push(format!("\"{}\" AS \"{}\"", dim_name, alias));
+        group_by_cols.push(format!("\"{}\"", dim_name));
+    }
+
+    // 2. Time dimensions
+    for td in &request.time_dimensions {
+        let td_name = td.dimension.split('.').nth(1).unwrap_or(&td.dimension);
+        let alias = td.dimension.replace('.', "__");
+        if let Some(ref gran) = td.granularity {
+            if let Some(ref stored_gran) = entry.granularity {
+                let stored_col = format!("{}__{}", td_name, stored_gran);
+                if gran == stored_gran {
+                    select_cols.push(format!("\"{}\" AS \"{}\"", stored_col, alias));
+                    group_by_cols.push(format!("\"{}\"", stored_col));
+                } else {
+                    let trunc = format!("date_trunc('{}', \"{}\")", gran, stored_col);
+                    select_cols.push(format!("{} AS \"{}\"", trunc, alias));
+                    group_by_cols.push(trunc);
+                }
+            }
+        } else {
+            // No requested granularity: use the stored truncated column if available,
+            // otherwise fall back to the bare dimension name.
+            // The rollup never stores a raw time column — only the truncated form
+            // (e.g., `created_at__month`), so prefer that when present.
+            let col = if let Some(ref stored_gran) = entry.granularity {
+                format!("\"{}\"", format!("{}__{}", td_name, stored_gran))
+            } else {
+                format!("\"{}\"", td_name)
+            };
+            select_cols.push(format!("{} AS \"{}\"", col, alias));
+            group_by_cols.push(col);
+        }
+    }
+
+    // 3. Measures (re-aggregated)
+    for measure in &request.measures {
+        let measure_name = measure.split('.').nth(1).unwrap_or(measure);
+        let alias = measure.replace('.', "__");
+
+        if let Some(m_meta) = entry
+            .measures
+            .iter()
+            .find(|m| m.get("name").and_then(|n| n.as_str()) == Some(measure_name))
+        {
+            let m_type = m_meta
+                .get("type")
+                .and_then(|t| t.as_str())
+                .unwrap_or("");
+            let columns: Vec<String> = m_meta
+                .get("columns")
+                .and_then(|c| c.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                        .collect()
+                })
+                .unwrap_or_default();
+
+            match m_type {
+                "sum" => {
+                    let col = columns
+                        .first()
+                        .cloned()
+                        .unwrap_or_else(|| format!("{}__sum", measure_name));
+                    select_cols.push(format!("SUM(\"{}\") AS \"{}\"", col, alias));
+                }
+                "count" => {
+                    let col = columns
+                        .first()
+                        .cloned()
+                        .unwrap_or_else(|| format!("{}__count", measure_name));
+                    select_cols.push(format!("SUM(\"{}\") AS \"{}\"", col, alias));
+                }
+                "average" => {
+                    let sum_col = columns
+                        .first()
+                        .cloned()
+                        .unwrap_or_else(|| format!("{}__sum", measure_name));
+                    let count_col = columns
+                        .get(1)
+                        .cloned()
+                        .unwrap_or_else(|| format!("{}__count", measure_name));
+                    select_cols.push(format!(
+                        "CAST(SUM(\"{}\") AS DOUBLE) / NULLIF(SUM(\"{}\"), 0) AS \"{}\"",
+                        sum_col, count_col, alias
+                    ));
+                }
+                "min" => {
+                    let col = columns
+                        .first()
+                        .cloned()
+                        .unwrap_or_else(|| format!("{}__min", measure_name));
+                    select_cols.push(format!("MIN(\"{}\") AS \"{}\"", col, alias));
+                }
+                "max" => {
+                    let col = columns
+                        .first()
+                        .cloned()
+                        .unwrap_or_else(|| format!("{}__max", measure_name));
+                    select_cols.push(format!("MAX(\"{}\") AS \"{}\"", col, alias));
+                }
+                "count_distinct" | "count_distinct_approx" => {
+                    let col = columns
+                        .first()
+                        .cloned()
+                        .unwrap_or_else(|| measure_name.to_string());
+                    select_cols.push(format!(
+                        "COUNT(DISTINCT \"{}\") AS \"{}\"",
+                        col, alias
+                    ));
+                }
+                "median" => {
+                    let col = columns
+                        .first()
+                        .cloned()
+                        .unwrap_or_else(|| measure_name.to_string());
+                    select_cols.push(format!("MEDIAN(\"{}\") AS \"{}\"", col, alias));
+                }
+                "number" => {
+                    let col = columns
+                        .first()
+                        .cloned()
+                        .unwrap_or_else(|| format!("{}__value", measure_name));
+                    select_cols.push(format!("\"{}\" AS \"{}\"", col, alias));
+                }
+                _ => {
+                    select_cols.push(format!("NULL AS \"{}\"", alias));
+                }
+            }
+        }
+    }
+
+    let select = select_cols.join(", ");
+    let group_by = if group_by_cols.is_empty() {
+        String::new()
+    } else {
+        format!("\nGROUP BY {}", group_by_cols.join(", "))
+    };
+
+    let limit = request
+        .limit
+        .map(|l| format!("\nLIMIT {}", l))
+        .unwrap_or_default();
+    let offset = request
+        .offset
+        .map(|o| format!("\nOFFSET {}", o))
+        .unwrap_or_default();
+
+    format!(
+        "SELECT {select}\nFROM read_parquet('{path}'){group_by}{limit}{offset}",
+        path = parquet_path.replace('\'', "''"),
+    )
+}
+
+/// Generate a warehouse SQL query that reads from the pre-aggregated table.
+///
+/// Note: this currently generates DuckDB-flavored SQL (standard `date_trunc`, `MEDIAN`, etc.)
+/// and substitutes the table name in place of `read_parquet(...)`. The `dialect` parameter is
+/// reserved for future dialect-aware SQL generation; it is not yet used.
+pub fn generate_warehouse_reagg_sql(
+    request: &crate::engine::query::QueryRequest,
+    entry: &LocalRollupEntry,
+    table_name: &str,
+    _dialect: &Dialect,
+) -> String {
+    let parquet_sql = generate_reagg_sql(request, entry, "__placeholder__");
+    parquet_sql.replace("read_parquet('__placeholder__')", table_name)
+}
+
 /// Build a ManifestEntry from a view and rollup spec.
 pub fn build_manifest_entry(
     view: &View,
@@ -440,6 +710,7 @@ pub fn build_manifest_entry(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::engine::query::QueryRequest;
 
     #[test]
     fn test_generate_build_sql_sum() {
@@ -585,5 +856,174 @@ mod tests {
             pre_aggregations: None,
             meta: None,
         }
+    }
+
+    fn test_local_rollup_entry() -> LocalRollupEntry {
+        LocalRollupEntry {
+            view_name: "orders".into(),
+            rollup_name: "by_region_monthly".into(),
+            rollup_hash: "a1b2c3d4".into(),
+            file: "orders__a1b2c3d4.parquet".into(),
+            dimensions: vec!["region".into()],
+            measures: vec![
+                serde_json::json!({"name": "total_revenue", "type": "sum", "columns": ["total_revenue__sum"]}),
+            ],
+            time_dimension: Some("created_at".into()),
+            granularity: Some("month".into()),
+            build_date: "2026-04-15".into(),
+        }
+    }
+
+    #[test]
+    fn test_reagg_sql_basic() {
+        let entry = test_local_rollup_entry();
+        let request = QueryRequest {
+            measures: vec!["orders.total_revenue".to_string()],
+            dimensions: vec!["orders.region".to_string()],
+            ..QueryRequest::new()
+        };
+        let sql = generate_reagg_sql(&request, &entry, "/data/orders.parquet");
+        assert!(sql.contains("read_parquet('/data/orders.parquet')"), "Missing FROM: {}", sql);
+        assert!(sql.contains("SUM(\"total_revenue__sum\")"), "Missing SUM re-agg: {}", sql);
+        assert!(sql.contains("\"region\""), "Missing dimension column: {}", sql);
+        assert!(sql.contains("GROUP BY"), "Missing GROUP BY: {}", sql);
+    }
+
+    #[test]
+    fn test_reagg_sql_with_time_dimension_same_gran() {
+        use crate::engine::query::TimeDimensionQuery;
+        let entry = test_local_rollup_entry(); // stored gran = "month"
+        let request = QueryRequest {
+            measures: vec!["orders.total_revenue".to_string()],
+            time_dimensions: vec![TimeDimensionQuery {
+                dimension: "orders.created_at".to_string(),
+                granularity: Some("month".to_string()),
+                date_range: None,
+            }],
+            ..QueryRequest::new()
+        };
+        let sql = generate_reagg_sql(&request, &entry, "/data/orders.parquet");
+        // Same granularity: should select the stored column directly, no date_trunc
+        assert!(sql.contains("\"created_at__month\""), "Missing stored time col: {}", sql);
+        assert!(!sql.contains("date_trunc"), "Should not re-truncate same gran: {}", sql);
+    }
+
+    #[test]
+    fn test_reagg_sql_with_time_dimension_coarser_gran() {
+        use crate::engine::query::TimeDimensionQuery;
+        let entry = test_local_rollup_entry(); // stored gran = "month"
+        let request = QueryRequest {
+            measures: vec!["orders.total_revenue".to_string()],
+            time_dimensions: vec![TimeDimensionQuery {
+                dimension: "orders.created_at".to_string(),
+                granularity: Some("year".to_string()),
+                date_range: None,
+            }],
+            ..QueryRequest::new()
+        };
+        let sql = generate_reagg_sql(&request, &entry, "/data/orders.parquet");
+        // Coarser granularity: should apply date_trunc over the stored monthly column
+        assert!(sql.contains("date_trunc('year', \"created_at__month\")"), "Missing date_trunc: {}", sql);
+    }
+
+    #[test]
+    fn test_reagg_sql_no_gran_uses_stored_col() {
+        use crate::engine::query::TimeDimensionQuery;
+        let entry = test_local_rollup_entry(); // stored gran = "month"
+        let request = QueryRequest {
+            measures: vec!["orders.total_revenue".to_string()],
+            time_dimensions: vec![TimeDimensionQuery {
+                dimension: "orders.created_at".to_string(),
+                granularity: None,
+                date_range: None,
+            }],
+            ..QueryRequest::new()
+        };
+        let sql = generate_reagg_sql(&request, &entry, "/data/orders.parquet");
+        // No requested gran: should fall back to the stored truncated column, not bare "created_at"
+        assert!(sql.contains("\"created_at__month\""), "Should use stored truncated col: {}", sql);
+        assert!(!sql.contains("\"created_at\""), "Should not select bare column: {}", sql);
+    }
+
+    #[test]
+    fn test_reagg_sql_parquet_path_escaping() {
+        let entry = test_local_rollup_entry();
+        let request = QueryRequest {
+            measures: vec!["orders.total_revenue".to_string()],
+            ..QueryRequest::new()
+        };
+        let sql = generate_reagg_sql(&request, &entry, "/data/it's_here.parquet");
+        assert!(sql.contains("it''s_here"), "Single quote should be escaped: {}", sql);
+    }
+
+    #[test]
+    fn test_reagg_sql_limit_offset() {
+        let entry = test_local_rollup_entry();
+        let request = QueryRequest {
+            measures: vec!["orders.total_revenue".to_string()],
+            limit: Some(100),
+            offset: Some(20),
+            ..QueryRequest::new()
+        };
+        let sql = generate_reagg_sql(&request, &entry, "/data/orders.parquet");
+        assert!(sql.contains("LIMIT 100"), "Missing LIMIT: {}", sql);
+        assert!(sql.contains("OFFSET 20"), "Missing OFFSET: {}", sql);
+    }
+
+    #[test]
+    fn test_warehouse_reagg_sql_substitutes_table() {
+        let entry = test_local_rollup_entry();
+        let request = QueryRequest {
+            measures: vec!["orders.total_revenue".to_string()],
+            dimensions: vec!["orders.region".to_string()],
+            ..QueryRequest::new()
+        };
+        let sql = generate_warehouse_reagg_sql(
+            &request,
+            &entry,
+            "AIRLAYER.orders__a1b2c3d4__20260415",
+            &crate::dialect::Dialect::ClickHouse,
+        );
+        assert!(!sql.contains("read_parquet"), "Should not have read_parquet: {}", sql);
+        assert!(sql.contains("AIRLAYER.orders__a1b2c3d4__20260415"), "Missing table name: {}", sql);
+    }
+
+    #[test]
+    fn test_coverage_check_covered() {
+        let entry = test_local_rollup_entry();
+        let rollups = [entry];
+        let request = QueryRequest {
+            measures: vec!["orders.total_revenue".to_string()],
+            dimensions: vec!["orders.region".to_string()],
+            ..QueryRequest::new()
+        };
+        let result = check_coverage(&request, &rollups);
+        assert!(result.is_some(), "Expected coverage match");
+    }
+
+    #[test]
+    fn test_coverage_check_not_covered_missing_dim() {
+        let entry = test_local_rollup_entry();
+        let rollups = [entry];
+        let request = QueryRequest {
+            measures: vec!["orders.total_revenue".to_string()],
+            dimensions: vec!["orders.status".to_string()], // Not in rollup
+            ..QueryRequest::new()
+        };
+        let result = check_coverage(&request, &rollups);
+        assert!(result.is_none(), "Expected no coverage match");
+    }
+
+    #[test]
+    fn test_coverage_check_not_covered_missing_measure() {
+        let entry = test_local_rollup_entry();
+        let rollups = [entry];
+        let request = QueryRequest {
+            measures: vec!["orders.other_metric".to_string()], // Not in rollup
+            dimensions: vec!["orders.region".to_string()],
+            ..QueryRequest::new()
+        };
+        let result = check_coverage(&request, &rollups);
+        assert!(result.is_none(), "Expected no coverage match");
     }
 }
