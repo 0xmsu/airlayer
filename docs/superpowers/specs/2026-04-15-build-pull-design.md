@@ -78,7 +78,7 @@ airlayer build [OPTIONS]
 ```
 
 - `view_name`: the view it came from
-- `rollup_hash`: deterministic short hash of dimension/measure/granularity combo
+- `rollup_hash`: deterministic short hash (first 8 chars of SHA-256) of the canonical representation: sorted dimension names + sorted measure names + time_dimension + granularity. The same rollup definition always produces the same hash.
 - `YYYYMMDD`: build date
 
 ### Manifest table
