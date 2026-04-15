@@ -230,6 +230,7 @@ mod tests {
                 inherits_from: None,
                 meta: None,
             }],
+            pre_aggregations: None,
             meta: Some(HashMap::from([(
                 "domain".to_string(),
                 vec!["commerce".to_string()],

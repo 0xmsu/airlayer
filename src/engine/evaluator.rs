@@ -257,6 +257,7 @@ mod tests {
                     meta: None,
                 }]),
                 segments: vec![],
+                pre_aggregations: None,
                 meta: None,
             }],
             None,

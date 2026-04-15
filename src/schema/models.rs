@@ -472,6 +472,20 @@ impl SavedQuery {
     }
 }
 
+/// A pre-aggregation rollup definition within a view.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PreAggregation {
+    pub name: String,
+    #[serde(default)]
+    pub dimensions: Vec<String>,
+    #[serde(default)]
+    pub measures: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub time_dimension: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub granularity: Option<String>,
+}
+
 /// A view in the semantic layer — the core unit of the schema.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct View {
@@ -499,6 +513,9 @@ pub struct View {
     pub measures: Option<Vec<Measure>>,
     #[serde(default)]
     pub segments: Vec<Segment>,
+    /// Pre-aggregation rollup definitions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pre_aggregations: Option<Vec<PreAggregation>>,
     /// User-defined metadata for discovery and organization.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub meta: Option<HashMap<String, Vec<String>>>,
@@ -608,6 +625,64 @@ impl SemanticLayer {
     }
 }
 
+#[cfg(test)]
+mod preagg_tests {
+    use super::*;
+
+    #[test]
+    fn test_view_with_pre_aggregations_parses() {
+        let yaml = r#"
+name: orders
+description: "Test orders"
+table: orders
+dimensions:
+  - name: region
+    type: string
+    expr: region
+  - name: created_at
+    type: datetime
+    expr: created_at
+measures:
+  - name: total_revenue
+    type: sum
+    expr: revenue
+pre_aggregations:
+  - name: by_region_monthly
+    dimensions: [region]
+    measures: [total_revenue]
+    time_dimension: created_at
+    granularity: month
+"#;
+        let raw: RawView = serde_yaml::from_str(yaml).expect("parse");
+        assert_eq!(raw.pre_aggregations.as_ref().unwrap().len(), 1);
+        let pa = &raw.pre_aggregations.as_ref().unwrap()[0];
+        assert_eq!(pa.name, "by_region_monthly");
+        assert_eq!(pa.dimensions, vec!["region"]);
+        assert_eq!(pa.measures, vec!["total_revenue"]);
+        assert_eq!(pa.time_dimension.as_deref(), Some("created_at"));
+        assert_eq!(pa.granularity.as_deref(), Some("month"));
+    }
+
+    #[test]
+    fn test_view_without_pre_aggregations_parses() {
+        let yaml = r#"
+name: orders
+description: "Test orders"
+table: orders
+dimensions:
+  - name: region
+    type: string
+    expr: region
+measures:
+  - name: total_revenue
+    type: sum
+    expr: revenue
+"#;
+        let raw: RawView = serde_yaml::from_str(yaml).expect("parse");
+        assert!(raw.pre_aggregations.is_none());
+    }
+}
+
 /// Items that can appear in the dimensions/measures/entities lists.
 /// Supports both inline definitions and inherits_from references.
 /// When only `inherits_from` is present, the item is resolved from globals.
@@ -659,6 +734,9 @@ pub struct RawView {
     pub measures: Option<Vec<MeasureItem>>,
     #[serde(default)]
     pub segments: Vec<Segment>,
+    /// Pre-aggregation rollup definitions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pre_aggregations: Option<Vec<PreAggregation>>,
     /// User-defined metadata for discovery and organization.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub meta: Option<HashMap<String, Vec<String>>>,
