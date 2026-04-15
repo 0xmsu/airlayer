@@ -173,6 +173,28 @@ fn build_rollup_measure(m: &crate::schema::models::Measure) -> RollupMeasure {
     }
 }
 
+/// Local cache manifest written by `pull`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LocalManifest {
+    pub pulled_at: String,
+    pub source_database: String,
+    pub rollups: Vec<LocalRollupEntry>,
+}
+
+/// An entry in the local cache manifest.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LocalRollupEntry {
+    pub view_name: String,
+    pub rollup_name: String,
+    pub rollup_hash: String,
+    pub file: String,
+    pub dimensions: Vec<String>,
+    pub measures: Vec<serde_json::Value>,
+    pub time_dimension: Option<String>,
+    pub granularity: Option<String>,
+    pub build_date: String,
+}
+
 /// Manifest entry for a pre-aggregated rollup.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ManifestEntry {

@@ -163,6 +163,25 @@ pub enum Commands {
         globals: Option<PathBuf>,
     },
 
+    /// Pull pre-aggregated data from the warehouse to local Parquet cache.
+    Pull {
+        /// Path to config.yml.
+        #[arg(short, long)]
+        config: Option<PathBuf>,
+
+        /// Source schema name (default: AIRLAYER).
+        #[arg(long, default_value = "AIRLAYER")]
+        schema: String,
+
+        /// Which database to pull from (default: first in config.yml).
+        #[arg(long)]
+        database: Option<String>,
+
+        /// Pull only a specific view.
+        #[arg(long)]
+        view: Option<String>,
+    },
+
     /// List all views, dimensions, and measures.
     Inspect {
         /// Path to globals file (optional).
@@ -643,6 +662,20 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
                 database.as_deref(),
                 view.as_deref(),
                 dry_run,
+            )?;
+        }
+
+        Commands::Pull {
+            config,
+            schema,
+            database,
+            view,
+        } => {
+            run_pull(
+                config.as_ref(),
+                &schema,
+                database.as_deref(),
+                view.as_deref(),
             )?;
         }
 
@@ -1525,10 +1558,213 @@ fn run_build(
 
     #[cfg(not(feature = "exec"))]
     {
+        let _ = (&all_stmts, &manifest_entries, &content, &effective_database);
         return Err("build requires an exec-* feature flag to be enabled".into());
     }
 
     Ok(())
+}
+
+/// Pull pre-aggregated data from the warehouse to local Parquet files.
+fn run_pull(
+    config: Option<&PathBuf>,
+    schema: &str,
+    database: Option<&str>,
+    view_filter: Option<&str>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use crate::engine::preagg;
+
+    let ctx = resolve_project_context(config)?;
+    let config_path = ctx
+        .config_path
+        .as_ref()
+        .ok_or("pull requires a config.yml (auto-detected or via --config)")?;
+    let content = std::fs::read_to_string(config_path)
+        .map_err(|e| format!("Failed to read config {}: {}", config_path.display(), e))?;
+    let partial: PartialConfig = serde_yaml::from_str(&content)
+        .map_err(|e| format!("Failed to parse config: {}", e))?;
+
+    let effective_schema = if schema != "AIRLAYER" {
+        schema.to_string()
+    } else if let Some(ref pa) = partial.pre_aggregations {
+        pa.schema.clone().unwrap_or_else(|| "AIRLAYER".to_string())
+    } else {
+        "AIRLAYER".to_string()
+    };
+
+    let effective_database = database
+        .map(|s| s.to_string())
+        .or_else(|| partial.pre_aggregations.as_ref().and_then(|pa| pa.database.clone()));
+
+    #[cfg(feature = "exec")]
+    {
+        let exec_config: crate::executor::ExecutionConfig =
+            serde_yaml::from_str(&content).map_err(|e| format!("Failed to parse config: {}", e))?;
+        let connection = if let Some(ref db_name) = effective_database {
+            exec_config.find_connection(db_name)?
+        } else {
+            exec_config.first_connection()?
+        };
+
+        // 1. Read manifest from warehouse (FINAL is ClickHouse-specific for ReplacingMergeTree)
+        let manifest_sql = format!(
+            "SELECT view_name, rollup_name, rollup_hash, table_name, dimensions, measures, \
+             time_dimension, granularity, build_date \
+             FROM {}.{}{}",
+            effective_schema, "__manifest",
+            // ClickHouse needs FINAL to deduplicate ReplacingMergeTree rows
+            if partial.databases.first().map(|d| d.db_type.as_str()) == Some("clickhouse") { " FINAL" } else { "" }
+        );
+        let manifest_result = crate::executor::execute(&connection, &manifest_sql, &[])
+            .map_err(|e| format!("Failed to read manifest: {}", e))?;
+
+        if manifest_result.rows.is_empty() {
+            return Err(format!("No rollups found in {}.{}", effective_schema, "__manifest").into());
+        }
+
+        // 2. Create cache directory
+        let cache_dir = ctx.base_dir.join(".airlayer").join("cache");
+        std::fs::create_dir_all(&cache_dir)?;
+
+        // 3. For each rollup, SELECT data and write to Parquet
+        let mut local_entries: Vec<preagg::LocalRollupEntry> = Vec::new();
+
+        for row in &manifest_result.rows {
+            let view_name = row.get("view_name").and_then(|v| v.as_str()).unwrap_or("");
+            let rollup_name = row.get("rollup_name").and_then(|v| v.as_str()).unwrap_or("");
+            let rollup_hash = row.get("rollup_hash").and_then(|v| v.as_str()).unwrap_or("");
+            let table_name = row.get("table_name").and_then(|v| v.as_str()).unwrap_or("");
+            let dimensions_str = row.get("dimensions").and_then(|v| v.as_str()).unwrap_or("[]");
+            let measures_str = row.get("measures").and_then(|v| v.as_str()).unwrap_or("[]");
+            let time_dim = row.get("time_dimension").and_then(|v| v.as_str()).unwrap_or("");
+            let granularity = row.get("granularity").and_then(|v| v.as_str()).unwrap_or("");
+            let build_date = row.get("build_date").and_then(|v| v.as_str()).unwrap_or("");
+
+            // Apply view filter
+            if let Some(filter) = view_filter {
+                if view_name != filter {
+                    continue;
+                }
+            }
+
+            let parquet_filename = format!("{}__{}.parquet", view_name, rollup_hash);
+            let parquet_path = cache_dir.join(&parquet_filename);
+
+            eprintln!("Pulling {}.{} → {}", view_name, rollup_name, parquet_filename);
+
+            // SELECT all data from the pre-agg table
+            let select_sql = format!("SELECT * FROM {}", table_name);
+            let data = crate::executor::execute(&connection, &select_sql, &[])
+                .map_err(|e| format!("Failed to pull {}: {}", table_name, e))?;
+
+            // Write to Parquet using DuckDB
+            write_parquet(&data, &parquet_path)?;
+
+            let dimensions: Vec<String> = serde_json::from_str(dimensions_str).unwrap_or_default();
+            let measures: Vec<serde_json::Value> = serde_json::from_str(measures_str).unwrap_or_default();
+
+            local_entries.push(preagg::LocalRollupEntry {
+                view_name: view_name.to_string(),
+                rollup_name: rollup_name.to_string(),
+                rollup_hash: rollup_hash.to_string(),
+                file: parquet_filename,
+                dimensions,
+                measures,
+                time_dimension: if time_dim.is_empty() { None } else { Some(time_dim.to_string()) },
+                granularity: if granularity.is_empty() { None } else { Some(granularity.to_string()) },
+                build_date: build_date.to_string(),
+            });
+        }
+
+        if local_entries.is_empty() {
+            return Err("No matching rollups found to pull".into());
+        }
+
+        // 4. Write local manifest.json
+        let local_manifest = preagg::LocalManifest {
+            pulled_at: chrono::Utc::now().to_rfc3339(),
+            source_database: effective_database.unwrap_or_else(|| "default".to_string()),
+            rollups: local_entries,
+        };
+        let manifest_path = cache_dir.join("manifest.json");
+        let manifest_json = serde_json::to_string_pretty(&local_manifest)?;
+        std::fs::write(&manifest_path, &manifest_json)?;
+
+        eprintln!("Pull complete: {} rollup(s) → {}", local_manifest.rollups.len(), cache_dir.display());
+        println!("{}", manifest_json);
+    }
+
+    #[cfg(not(feature = "exec"))]
+    {
+        let _ = (effective_schema, effective_database, view_filter);
+        return Err("pull requires an exec-* feature flag to be enabled".into());
+    }
+
+    Ok(())
+}
+
+/// Write an ExecutionResult to a Parquet file using an in-memory DuckDB connection.
+#[cfg(feature = "exec-duckdb")]
+fn write_parquet(
+    data: &crate::executor::ExecutionResult,
+    path: &std::path::Path,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if data.rows.is_empty() {
+        // Empty table — write a zero-row Parquet (skip gracefully)
+        eprintln!("  Warning: no rows to write, skipping Parquet output");
+        return Ok(());
+    }
+
+    let conn = duckdb::Connection::open_in_memory()
+        .map_err(|e| format!("Failed to open DuckDB: {}", e))?;
+
+    // Build column definitions (all as VARCHAR for simplicity; Parquet will store as string columns)
+    let columns: Vec<String> = data.columns.iter()
+        .map(|c| format!("\"{}\" VARCHAR", c.replace('"', "\"\"")))
+        .collect();
+    let create_sql = format!("CREATE TABLE __export ({})", columns.join(", "));
+    conn.execute_batch(&create_sql)
+        .map_err(|e| format!("Failed to create export table: {}", e))?;
+
+    // Insert rows
+    let placeholders: Vec<String> = data.columns.iter().map(|_| "?".to_string()).collect();
+    let insert_sql = format!("INSERT INTO __export VALUES ({})", placeholders.join(", "));
+
+    for row in &data.rows {
+        let values: Vec<String> = data.columns.iter()
+            .map(|col| {
+                row.get(col)
+                    .map(|v| match v {
+                        serde_json::Value::Null => String::new(),
+                        serde_json::Value::String(s) => s.clone(),
+                        other => other.to_string(),
+                    })
+                    .unwrap_or_default()
+            })
+            .collect();
+        let params: Vec<&dyn duckdb::ToSql> = values.iter()
+            .map(|v| v as &dyn duckdb::ToSql)
+            .collect();
+        conn.execute(&insert_sql, params.as_slice())
+            .map_err(|e| format!("Failed to insert row: {}", e))?;
+    }
+
+    // Export to Parquet
+    let path_str = path.to_str().ok_or("Invalid path")?;
+    conn.execute_batch(&format!(
+        "COPY __export TO '{}' (FORMAT PARQUET)",
+        path_str.replace('\'', "''")
+    )).map_err(|e| format!("Failed to export Parquet: {}", e))?;
+
+    Ok(())
+}
+
+#[cfg(not(feature = "exec-duckdb"))]
+fn write_parquet(
+    _data: &crate::executor::ExecutionResult,
+    _path: &std::path::Path,
+) -> Result<(), Box<dyn std::error::Error>> {
+    Err("pull requires the exec-duckdb feature flag".into())
 }
 
 /// Compile-only path (no --execute). Prints raw SQL to stdout.
