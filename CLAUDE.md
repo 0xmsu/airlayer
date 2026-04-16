@@ -269,16 +269,21 @@ steps:
 
 ## Foreign semantic model support
 
-airlayer can convert semantic models from Cube.js, Looker LookML, dbt MetricFlow, and Omni into native `.view.yml` files. See **[docs/foreign-models.md](docs/foreign-models.md)** for full documentation.
+airlayer works out of the box with Cube.js, LookML, dbt MetricFlow, and Omni repositories. When no `.view.yml` files are found in a project directory, airlayer auto-detects foreign formats and loads them natively — no conversion step required.
 
 ```bash
+# Query directly from a Cube.js/LookML/dbt/Omni project
+cd /path/to/cube-project && airlayer query --measure orders.count
+cd /path/to/lookml-project && airlayer inspect
+
+# Explicit conversion (optional)
 airlayer convert --format cube ./cube_schema/ --output ./views/
 airlayer convert --format lookml ./models/orders.lkml --stdout
-airlayer convert --format dbt ./models/semantic.yml --output ./views/
-airlayer convert --format omni ./models/analytics.yml --output ./views/
 ```
 
-Parsers live in `src/schema/foreign/` with per-format modules: `cube.rs`, `lookml.rs`, `dbt.rs`, `omni.rs`. The `ForeignFormat` enum dispatches conversion. All parsers produce airlayer `View` types that can be compiled to SQL immediately.
+Auto-detection order: LookML (`.lkml` extension) → Cube.js (`cubes:` key) → dbt (`semantic_models:` key) → Omni (`views:` key). Native `.view.yml` files always take priority.
+
+Parsers live in `src/schema/foreign/` with per-format modules: `cube.rs`, `lookml.rs`, `dbt.rs`, `omni.rs`. The `ForeignFormat` enum dispatches conversion. All parsers produce airlayer `View` types that can be compiled to SQL immediately. See **[docs/foreign-models.md](docs/foreign-models.md)** for full documentation.
 
 ### Testing foreign model parsers
 

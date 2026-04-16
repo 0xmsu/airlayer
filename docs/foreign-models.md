@@ -1,19 +1,43 @@
 # Foreign Semantic Model Support
 
-airlayer can convert semantic models from other platforms into its native `.view.yml` format, enabling you to compile SQL queries from Cube.js, Looker LookML, dbt MetricFlow, and Omni definitions.
+airlayer works out of the box with Cube.js, Looker LookML, dbt MetricFlow, and Omni repositories. Just point airlayer at a directory containing foreign model files and query directly — no conversion step required.
 
 ## Supported Formats
 
-| Format | File Extensions | CLI Flag | Description |
-|--------|----------------|----------|-------------|
-| Cube.js | `.yml`, `.yaml` | `--format cube` | Cube.js YAML schema (cubes, dimensions, measures, joins) |
-| LookML | `.lkml` | `--format lookml` | Looker LookML (views, explores, dimension_groups) |
-| dbt MetricFlow | `.yml`, `.yaml` | `--format dbt` | dbt semantic_models + metrics |
-| Omni | `.yml`, `.yaml` | `--format omni` | Omni Analytics YAML (views, topics, dimension_groups) |
+| Format | File Extensions | Auto-detected by | Description |
+|--------|----------------|-----------------|-------------|
+| Cube.js | `.yml`, `.yaml` | `cubes:` key | Cube.js YAML schema (cubes, dimensions, measures, joins) |
+| LookML | `.lkml` | File extension | Looker LookML (views, explores, dimension_groups) |
+| dbt MetricFlow | `.yml`, `.yaml` | `semantic_models:` key | dbt semantic_models + metrics |
+| Omni | `.yml`, `.yaml` | `views:` + `topics:` keys | Omni Analytics YAML (views, topics, dimension_groups) |
 
 ## Quick Start
 
-### Convert and query
+### Query directly from any format (no conversion needed)
+
+```bash
+# In a Cube.js project directory
+cd /path/to/cube-project
+airlayer query --measure orders.count --dimension orders.status
+
+# In a LookML project
+cd /path/to/lookml-project
+airlayer query --measure orders.total_revenue --dimension orders.status
+
+# In a dbt project with semantic models
+cd /path/to/dbt-project
+airlayer query --measure orders.order_count --dimension orders.status
+
+# In an Omni project
+cd /path/to/omni-project
+airlayer inspect
+```
+
+airlayer auto-detects the format by scanning files in the directory. If `.view.yml` files exist, they take priority. Otherwise, airlayer checks for foreign formats in this order: LookML (`.lkml` extension) → Cube.js (`cubes:` key) → dbt (`semantic_models:` key) → Omni (`views:` key).
+
+### Explicit conversion (optional)
+
+You can also explicitly convert foreign models to `.view.yml` files:
 
 ```bash
 # Convert a Cube.js schema to airlayer views

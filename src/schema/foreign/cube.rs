@@ -288,8 +288,7 @@ fn convert_cube(
     let description = cube
         .description
         .clone()
-        .or_else(|| cube.title.clone())
-        .unwrap_or_else(|| format!("Converted from Cube.js cube '{}'", cube_name));
+        .or_else(|| cube.title.clone());
 
     View {
         name: cube_name.clone(),

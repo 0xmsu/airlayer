@@ -422,8 +422,7 @@ fn convert_view(
 
     View {
         name: name.to_string(),
-        description: description
-            .unwrap_or_else(|| format!("Converted from LookML view '{}'", name)),
+        description,
         label,
         datasource: None,
         dialect: None,

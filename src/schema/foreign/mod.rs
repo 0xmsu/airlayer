@@ -133,6 +133,82 @@ pub fn convert_directory(
     })
 }
 
+/// Auto-detect which foreign format (if any) is present in a directory.
+///
+/// Detection heuristics (checked in order):
+/// 1. `.lkml` files → LookML
+/// 2. YAML files containing `cubes:` key → Cube.js
+/// 3. YAML files containing `semantic_models:` key → dbt MetricFlow
+/// 4. YAML files containing top-level `views:` + `topics:` keys → Omni
+///
+/// Returns `None` if no foreign format is detected.
+#[cfg(feature = "cli")]
+pub fn detect_format(dir: &std::path::Path) -> Option<ForeignFormat> {
+    // Check for .lkml files first (unambiguous extension)
+    let lkml_pattern = dir.join("**/*.lkml");
+    if let Ok(paths) = glob::glob(lkml_pattern.to_str().unwrap_or("")) {
+        if paths.into_iter().any(|p| p.is_ok()) {
+            return Some(ForeignFormat::LookML);
+        }
+    }
+
+    // Scan YAML files for format-specific keys
+    let yaml_pattern = dir.join("**/*.yml");
+    let yaml2_pattern = dir.join("**/*.yaml");
+    let mut yaml_files = Vec::new();
+    for pattern in [&yaml_pattern, &yaml2_pattern] {
+        if let Ok(paths) = glob::glob(pattern.to_str().unwrap_or("")) {
+            for entry in paths.flatten() {
+                yaml_files.push(entry);
+            }
+        }
+    }
+
+    let mut has_cubes = false;
+    let mut has_semantic_models = false;
+    let mut has_omni_views = false;
+
+    for path in &yaml_files {
+        if let Ok(content) = std::fs::read_to_string(path) {
+            // Quick line-scan for top-level keys (avoids full YAML parse)
+            for line in content.lines() {
+                let trimmed = line.trim();
+                if trimmed == "cubes:" || trimmed.starts_with("cubes:") {
+                    has_cubes = true;
+                }
+                if trimmed == "semantic_models:" || trimmed.starts_with("semantic_models:") {
+                    has_semantic_models = true;
+                }
+                // Omni uses map-style `views:` with nested dimension maps
+                if trimmed == "views:" || trimmed.starts_with("views:") {
+                    has_omni_views = true;
+                }
+            }
+        }
+    }
+
+    // Priority: Cube > dbt > Omni (since views: is ambiguous)
+    if has_cubes {
+        return Some(ForeignFormat::Cube);
+    }
+    if has_semantic_models {
+        return Some(ForeignFormat::Dbt);
+    }
+    if has_omni_views {
+        return Some(ForeignFormat::Omni);
+    }
+
+    None
+}
+
+/// Auto-detect and load foreign models from a directory.
+/// Returns the converted views, or None if no foreign format was detected.
+#[cfg(feature = "cli")]
+pub fn auto_load_directory(dir: &std::path::Path) -> Option<Result<ConversionResult, String>> {
+    let format = detect_format(dir)?;
+    Some(convert_directory(format, dir))
+}
+
 // ── Shared helpers for foreign parsers ───────────────────────────────
 
 /// Map a foreign dimension type string to airlayer's DimensionType.

@@ -246,11 +246,36 @@ fn convert_semantic_model(model: &DbtSemanticModel, warnings: &mut Vec<String>) 
         .collect();
 
     // Convert dimensions
-    let dimensions: Vec<Dimension> = model
+    let mut dimensions: Vec<Dimension> = model
         .dimensions
         .iter()
         .map(|d| convert_dbt_dimension(d, model_name, warnings))
         .collect();
+
+    // Add implicit dimensions for entity keys not already defined as dimensions
+    for entity in &entities {
+        if let Some(ref key) = entity.key {
+            if !dimensions.iter().any(|d| d.name == *key) {
+                dimensions.push(Dimension {
+                    name: key.clone(),
+                    dimension_type: DimensionType::String,
+                    description: None,
+                    expr: key.clone(),
+                    original_expr: None,
+                    samples: None,
+                    synonyms: None,
+                    primary_key: if entity.entity_type == EntityType::Primary {
+                        Some(true)
+                    } else {
+                        None
+                    },
+                    sub_query: None,
+                    inherits_from: None,
+                    meta: None,
+                });
+            }
+        }
+    }
 
     // Convert measures
     let measures: Vec<Measure> = model
@@ -259,10 +284,7 @@ fn convert_semantic_model(model: &DbtSemanticModel, warnings: &mut Vec<String>) 
         .map(|m| convert_dbt_measure(m, model_name, warnings))
         .collect();
 
-    let description = model
-        .description
-        .clone()
-        .unwrap_or_else(|| format!("Converted from dbt semantic model '{}'", model_name));
+    let description = model.description.clone();
 
     View {
         name: model_name.clone(),
@@ -601,7 +623,8 @@ semantic_models:
         assert_eq!(view.entities[1].entity_type, EntityType::Foreign);
 
         // Dimensions
-        assert_eq!(view.dimensions.len(), 2);
+        // 2 explicit dimensions + 2 implicit from entity keys (order_id, customer_id)
+        assert_eq!(view.dimensions.len(), 4);
         assert_eq!(view.dimensions[0].name, "status");
         assert_eq!(view.dimensions[0].dimension_type, DimensionType::String);
         assert_eq!(view.dimensions[1].name, "ordered_at");

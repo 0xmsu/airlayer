@@ -225,10 +225,7 @@ fn convert_omni_view(name: &str, omni: &OmniView, warnings: &mut Vec<String>) ->
 
     View {
         name: name.to_string(),
-        description: omni
-            .description
-            .clone()
-            .unwrap_or_else(|| format!("Converted from Omni view '{}'", name)),
+        description: omni.description.clone(),
         label: omni.label.clone(),
         datasource: None,
         dialect: None,

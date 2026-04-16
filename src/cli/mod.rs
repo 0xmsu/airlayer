@@ -408,8 +408,49 @@ fn load_from_directory(
     let q = parser.parse_saved_queries(effective_queries_dir)?;
     let saved_queries = if q.is_empty() { None } else { Some(q) };
 
+    // If no .view.yml files found, try auto-detecting foreign model formats
     if all_views.is_empty() {
-        return Err(format!("No .view.yml files found in {}", base_dir.display()).into());
+        match crate::schema::foreign::auto_load_directory(base_dir) {
+            Some(Ok(result)) => {
+                for warning in &result.warnings {
+                    eprintln!("warning: {}", warning);
+                }
+                if result.views.is_empty() {
+                    return Err(format!(
+                        "No views found in {} (tried .view.yml and foreign formats)",
+                        base_dir.display()
+                    ).into());
+                }
+                let fmt = crate::schema::foreign::detect_format(base_dir)
+                    .map(|f| f.to_string())
+                    .unwrap_or_else(|| "unknown".to_string());
+                eprintln!(
+                    "Loaded {} views from {} format in {}",
+                    result.views.len(),
+                    fmt,
+                    base_dir.display()
+                );
+                return Ok(SemanticLayer::with_motifs_and_queries(
+                    result.views,
+                    topics,
+                    motifs,
+                    saved_queries,
+                ));
+            }
+            Some(Err(e)) => {
+                return Err(format!(
+                    "No .view.yml files found in {}, and foreign format loading failed: {}",
+                    base_dir.display(),
+                    e
+                ).into());
+            }
+            None => {
+                return Err(format!(
+                    "No .view.yml files found in {} (also checked for Cube.js, LookML, dbt, and Omni formats)",
+                    base_dir.display()
+                ).into());
+            }
+        }
     }
 
     Ok(SemanticLayer::with_motifs_and_queries(
