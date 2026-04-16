@@ -1493,7 +1493,7 @@ fn run_build(
     let views: Vec<&crate::schema::models::View> = layer
         .views
         .iter()
-        .filter(|v| view_filter.map_or(true, |f| v.name == f))
+        .filter(|v| view_filter.is_none_or(|f| v.name == f))
         .collect();
 
     if views.is_empty() {

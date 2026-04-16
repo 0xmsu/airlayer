@@ -124,7 +124,7 @@ fn generate_default_rollup(view: &View) -> RollupSpec {
         .measures_list()
         .iter()
         .filter(|m| m.measure_type != MeasureType::Custom)
-        .map(|m| build_rollup_measure(m))
+        .map(build_rollup_measure)
         .collect();
 
     let measure_names: Vec<String> = measures.iter().map(|m| m.name.clone()).collect();
@@ -425,12 +425,7 @@ pub fn check_coverage<'a>(
     request: &crate::engine::query::QueryRequest,
     rollups: &'a [LocalRollupEntry],
 ) -> Option<&'a LocalRollupEntry> {
-    for entry in rollups {
-        if covers(request, entry) {
-            return Some(entry);
-        }
-    }
-    None
+    rollups.iter().find(|entry| covers(request, entry))
 }
 
 fn covers(request: &crate::engine::query::QueryRequest, entry: &LocalRollupEntry) -> bool {
@@ -550,7 +545,7 @@ pub fn generate_reagg_sql(
             // The rollup never stores a raw time column — only the truncated form
             // (e.g., `created_at__month`), so prefer that when present.
             let col = if let Some(ref stored_gran) = entry.granularity {
-                format!("\"{}\"", format!("{}__{}", td_name, stored_gran))
+                format!("\"{}__{stored_gran}\"", td_name)
             } else {
                 format!("\"{}\"", td_name)
             };
