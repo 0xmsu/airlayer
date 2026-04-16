@@ -1979,4 +1979,501 @@ mod tests {
             "Number should be excluded"
         );
     }
+
+    // ── Comprehensive all-dialects tests ────────────────────────────────────
+
+    fn all_dialects() -> Vec<Dialect> {
+        vec![
+            Dialect::Postgres,
+            Dialect::MySQL,
+            Dialect::BigQuery,
+            Dialect::Snowflake,
+            Dialect::DuckDB,
+            Dialect::ClickHouse,
+            Dialect::Databricks,
+            Dialect::Redshift,
+            Dialect::SQLite,
+            Dialect::Domo,
+            Dialect::Presto,
+        ]
+    }
+
+    /// Helper: build a rollup entry with sum + average + count_distinct measures.
+    fn rich_local_rollup_entry() -> LocalRollupEntry {
+        LocalRollupEntry {
+            view_name: "orders".into(),
+            rollup_name: "by_region_monthly".into(),
+            rollup_hash: "a1b2c3d4".into(),
+            file: "orders__a1b2c3d4.parquet".into(),
+            dimensions: vec!["region".into(), "status".into()],
+            measures: vec![
+                serde_json::json!({"name": "total_revenue", "type": "sum", "columns": ["total_revenue__sum"]}),
+                serde_json::json!({"name": "avg_price", "type": "average", "columns": ["avg_price__sum", "avg_price__count"]}),
+                serde_json::json!({"name": "event_count", "type": "count", "columns": ["event_count__count"]}),
+                serde_json::json!({"name": "max_amount", "type": "max", "columns": ["max_amount__max"]}),
+                serde_json::json!({"name": "min_amount", "type": "min", "columns": ["min_amount__min"]}),
+                serde_json::json!({"name": "unique_users", "type": "count_distinct", "columns": ["user_id"]}),
+            ],
+            time_dimension: Some("created_at".into()),
+            granularity: Some("month".into()),
+            build_date: "2026-04-16".into(),
+        }
+    }
+
+    #[test]
+    fn test_build_sql_all_dialects() {
+        let view = test_view_with_preaggs();
+        let rollups = resolve_rollups(&view);
+        for dialect in all_dialects() {
+            let sqls = generate_build_sql(&view, &rollups[0], "preagg", "20260416", &dialect);
+            assert_eq!(sqls.len(), 2, "{}: expected DROP + CTAS", dialect);
+            let drop = &sqls[0];
+            let ctas = &sqls[1];
+            assert!(
+                drop.contains("DROP TABLE IF EXISTS"),
+                "{}: missing DROP: {}",
+                dialect,
+                drop
+            );
+            assert!(
+                ctas.contains("CREATE TABLE"),
+                "{}: missing CREATE TABLE: {}",
+                ctas,
+                dialect
+            );
+            assert!(ctas.contains("SUM("), "{}: missing SUM: {}", dialect, ctas);
+            assert!(
+                ctas.contains("GROUP BY"),
+                "{}: missing GROUP BY: {}",
+                dialect,
+                ctas
+            );
+            // ClickHouse should have MergeTree
+            if dialect == Dialect::ClickHouse {
+                assert!(
+                    ctas.contains("MergeTree"),
+                    "ClickHouse CTAS should have MergeTree: {}",
+                    ctas
+                );
+            }
+            // BigQuery/MySQL/Databricks/Domo should use backtick quoting
+            if matches!(
+                dialect,
+                Dialect::BigQuery | Dialect::MySQL | Dialect::Databricks | Dialect::Domo
+            ) {
+                assert!(
+                    ctas.contains('`'),
+                    "{}: should use backtick quoting: {}",
+                    dialect,
+                    ctas
+                );
+            }
+            // Snowflake should uppercase
+            if dialect == Dialect::Snowflake {
+                assert!(
+                    ctas.contains("\"PREAGG\""),
+                    "Snowflake should uppercase schema: {}",
+                    ctas
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_manifest_create_sql_all_dialects() {
+        for dialect in all_dialects() {
+            let sql = generate_manifest_create_sql("preagg", &dialect);
+            assert!(
+                sql.contains("CREATE TABLE IF NOT EXISTS"),
+                "{}: missing CREATE: {}",
+                dialect,
+                sql
+            );
+            let sql_lower = sql.to_lowercase();
+            assert!(
+                sql_lower.contains("__manifest"),
+                "{}: missing manifest: {}",
+                dialect,
+                sql
+            );
+            // Check type names
+            match dialect {
+                Dialect::ClickHouse => {
+                    assert!(sql.contains("String"), "{}: missing String type: {}", dialect, sql);
+                    assert!(
+                        sql.contains("ReplacingMergeTree"),
+                        "{}: missing engine: {}",
+                        dialect,
+                        sql
+                    );
+                }
+                Dialect::BigQuery => {
+                    assert!(sql.contains("STRING"), "{}: missing STRING type: {}", dialect, sql);
+                    assert!(
+                        !sql.contains("PRIMARY KEY"),
+                        "{}: BigQuery should not have PK: {}",
+                        dialect,
+                        sql
+                    );
+                }
+                Dialect::SQLite => {
+                    assert!(sql.contains("TEXT"), "{}: missing TEXT type: {}", dialect, sql);
+                    assert!(sql.contains("UNIQUE"), "{}: missing UNIQUE: {}", dialect, sql);
+                }
+                _ => {
+                    assert!(
+                        sql.contains("VARCHAR"),
+                        "{}: missing VARCHAR type: {}",
+                        dialect,
+                        sql
+                    );
+                    assert!(
+                        sql.contains("PRIMARY KEY"),
+                        "{}: missing PK: {}",
+                        dialect,
+                        sql
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_manifest_upsert_all_dialects() {
+        let entry = ManifestEntry {
+            view_name: "orders".into(),
+            rollup_name: "by_region".into(),
+            rollup_hash: "a1b2c3d4".into(),
+            table_name: "preagg.orders__a1b2c3d4__20260416".into(),
+            dimensions: vec!["region".into()],
+            measures_json: "[]".into(),
+            time_dimension: None,
+            granularity: None,
+            build_date: "2026-04-16".into(),
+        };
+        for dialect in all_dialects() {
+            let stmts = generate_manifest_upsert_sql("preagg", &entry, &dialect);
+            match dialect {
+                Dialect::ClickHouse => {
+                    assert_eq!(stmts.len(), 1, "{}: ClickHouse should have 1 stmt", dialect);
+                    assert!(
+                        stmts[0].starts_with("INSERT INTO"),
+                        "{}: should be INSERT: {}",
+                        dialect,
+                        stmts[0]
+                    );
+                }
+                Dialect::SQLite => {
+                    assert_eq!(stmts.len(), 1, "{}: SQLite should have 1 stmt", dialect);
+                    assert!(
+                        stmts[0].contains("INSERT OR REPLACE"),
+                        "{}: should be INSERT OR REPLACE: {}",
+                        dialect,
+                        stmts[0]
+                    );
+                }
+                _ => {
+                    assert_eq!(
+                        stmts.len(),
+                        2,
+                        "{}: should have DELETE + INSERT",
+                        dialect
+                    );
+                    assert!(
+                        stmts[0].contains("DELETE FROM"),
+                        "{}: first should be DELETE: {}",
+                        dialect,
+                        stmts[0]
+                    );
+                    assert!(
+                        stmts[1].starts_with("INSERT INTO"),
+                        "{}: second should be INSERT: {}",
+                        dialect,
+                        stmts[1]
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_warehouse_reagg_sql_all_dialects_basic() {
+        let entry = test_local_rollup_entry(); // sum measure, region dim, month time dim
+        let request = QueryRequest {
+            measures: vec!["orders.total_revenue".to_string()],
+            dimensions: vec!["orders.region".to_string()],
+            ..QueryRequest::new()
+        };
+        for dialect in all_dialects() {
+            let table = dialect.qualify_table("preagg", "orders__a1b2c3d4__20260416");
+            let sql = generate_warehouse_reagg_sql(&request, &entry, &table, &dialect);
+
+            // All dialects should have SELECT, FROM, GROUP BY
+            assert!(sql.contains("SELECT"), "{}: missing SELECT: {}", dialect, sql);
+            assert!(
+                sql.contains(&table),
+                "{}: missing table name: {}",
+                dialect,
+                sql
+            );
+            assert!(
+                sql.contains("GROUP BY"),
+                "{}: missing GROUP BY: {}",
+                dialect,
+                sql
+            );
+            assert!(sql.contains("SUM("), "{}: missing SUM: {}", dialect, sql);
+        }
+    }
+
+    #[test]
+    fn test_warehouse_reagg_sql_all_dialects_time_coarser_gran() {
+        use crate::engine::query::TimeDimensionQuery;
+        let entry = test_local_rollup_entry(); // stored gran = "month"
+        let request = QueryRequest {
+            measures: vec!["orders.total_revenue".to_string()],
+            time_dimensions: vec![TimeDimensionQuery {
+                dimension: "orders.created_at".to_string(),
+                granularity: Some("year".to_string()),
+                date_range: None,
+            }],
+            ..QueryRequest::new()
+        };
+        for dialect in all_dialects() {
+            let table = dialect.qualify_table("preagg", "orders__a1b2c3d4__20260416");
+            let sql = generate_warehouse_reagg_sql(&request, &entry, &table, &dialect);
+
+            // Should contain the dialect-specific date truncation
+            match dialect {
+                Dialect::MySQL | Dialect::Domo => {
+                    // MySQL uses DATE_FORMAT for year truncation
+                    assert!(
+                        sql.contains("DATE_FORMAT("),
+                        "{}: should use DATE_FORMAT for year: {}",
+                        dialect,
+                        sql
+                    );
+                }
+                Dialect::BigQuery => {
+                    assert!(
+                        sql.contains("TIMESTAMP_TRUNC("),
+                        "{}: should use TIMESTAMP_TRUNC: {}",
+                        dialect,
+                        sql
+                    );
+                    assert!(
+                        sql.contains("YEAR"),
+                        "{}: should have YEAR granularity: {}",
+                        dialect,
+                        sql
+                    );
+                }
+                Dialect::ClickHouse => {
+                    assert!(
+                        sql.contains("toStartOfYear("),
+                        "{}: should use toStartOfYear: {}",
+                        dialect,
+                        sql
+                    );
+                }
+                Dialect::Snowflake | Dialect::Presto => {
+                    assert!(
+                        sql.contains("DATE_TRUNC('year'"),
+                        "{}: should use DATE_TRUNC: {}",
+                        dialect,
+                        sql
+                    );
+                }
+                _ => {
+                    // Postgres, DuckDB, Redshift, SQLite, Databricks — lowercase date_trunc
+                    assert!(
+                        sql.contains("date_trunc('year'"),
+                        "{}: should use date_trunc: {}",
+                        dialect,
+                        sql
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_warehouse_reagg_sql_all_dialects_average() {
+        let entry = rich_local_rollup_entry();
+        let request = QueryRequest {
+            measures: vec!["orders.avg_price".to_string()],
+            ..QueryRequest::new()
+        };
+        for dialect in all_dialects() {
+            let table = dialect.qualify_table("preagg", "test");
+            let sql = generate_warehouse_reagg_sql(&request, &entry, &table, &dialect);
+            // All should use CAST + SUM/NULLIF pattern
+            assert!(sql.contains("CAST("), "{}: missing CAST: {}", dialect, sql);
+            assert!(
+                sql.contains("NULLIF("),
+                "{}: missing NULLIF: {}",
+                dialect,
+                sql
+            );
+            // Check dialect-specific cast type
+            match dialect {
+                Dialect::Postgres | Dialect::Redshift => {
+                    assert!(
+                        sql.contains("DOUBLE PRECISION"),
+                        "{}: should use DOUBLE PRECISION: {}",
+                        dialect,
+                        sql
+                    );
+                }
+                Dialect::BigQuery => {
+                    assert!(
+                        sql.contains("FLOAT64"),
+                        "{}: should use FLOAT64: {}",
+                        dialect,
+                        sql
+                    );
+                }
+                Dialect::ClickHouse => {
+                    assert!(
+                        sql.contains("Float64"),
+                        "{}: should use Float64: {}",
+                        dialect,
+                        sql
+                    );
+                }
+                Dialect::MySQL | Dialect::Domo => {
+                    assert!(
+                        sql.contains("DECIMAL(38,10)"),
+                        "{}: should use DECIMAL: {}",
+                        dialect,
+                        sql
+                    );
+                }
+                _ => {
+                    assert!(
+                        sql.contains("AS DOUBLE)"),
+                        "{}: should use DOUBLE: {}",
+                        dialect,
+                        sql
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_warehouse_reagg_sql_all_dialects_all_measure_types() {
+        let entry = rich_local_rollup_entry();
+        // Request all supported measure types
+        let request = QueryRequest {
+            measures: vec![
+                "orders.total_revenue".to_string(),
+                "orders.event_count".to_string(),
+                "orders.avg_price".to_string(),
+                "orders.max_amount".to_string(),
+                "orders.min_amount".to_string(),
+                "orders.unique_users".to_string(),
+            ],
+            dimensions: vec!["orders.region".to_string()],
+            ..QueryRequest::new()
+        };
+        for dialect in all_dialects() {
+            let table = dialect.qualify_table("preagg", "test");
+            let sql = generate_warehouse_reagg_sql(&request, &entry, &table, &dialect);
+
+            assert!(
+                sql.contains("SUM("),
+                "{}: missing SUM for sum/count: {}",
+                dialect,
+                sql
+            );
+            assert!(
+                sql.contains("MAX("),
+                "{}: missing MAX: {}",
+                dialect,
+                sql
+            );
+            assert!(
+                sql.contains("MIN("),
+                "{}: missing MIN: {}",
+                dialect,
+                sql
+            );
+            assert!(
+                sql.contains("COUNT(DISTINCT"),
+                "{}: missing COUNT DISTINCT: {}",
+                dialect,
+                sql
+            );
+            assert!(
+                sql.contains("CAST("),
+                "{}: missing CAST for avg: {}",
+                dialect,
+                sql
+            );
+        }
+    }
+
+    #[test]
+    fn test_warehouse_reagg_sql_snowflake_uppercase() {
+        let entry = test_local_rollup_entry();
+        let request = QueryRequest {
+            measures: vec!["orders.total_revenue".to_string()],
+            dimensions: vec!["orders.region".to_string()],
+            ..QueryRequest::new()
+        };
+        let table = Dialect::Snowflake.qualify_table("preagg", "orders__abc__20260416");
+        let sql = generate_warehouse_reagg_sql(&request, &entry, &table, &Dialect::Snowflake);
+
+        // Snowflake uppercases all identifiers
+        assert!(
+            sql.contains("\"REGION\""),
+            "Snowflake should uppercase dimension: {}",
+            sql
+        );
+        assert!(
+            sql.contains("\"TOTAL_REVENUE__SUM\""),
+            "Snowflake should uppercase measure col: {}",
+            sql
+        );
+        assert!(
+            sql.contains("\"ORDERS__TOTAL_REVENUE\""),
+            "Snowflake should uppercase alias: {}",
+            sql
+        );
+        assert!(
+            sql.contains("\"PREAGG\""),
+            "Snowflake should uppercase schema: {}",
+            sql
+        );
+    }
+
+    #[test]
+    fn test_create_schema_ddl_all_dialects() {
+        for dialect in all_dialects() {
+            let ddl = dialect.create_schema_ddl("preagg");
+            match dialect {
+                Dialect::BigQuery => {
+                    assert!(ddl.is_none(), "BigQuery should return None");
+                }
+                Dialect::ClickHouse => {
+                    let sql = ddl.unwrap();
+                    assert!(
+                        sql.contains("CREATE DATABASE"),
+                        "ClickHouse should use DATABASE: {}",
+                        sql
+                    );
+                }
+                _ => {
+                    let sql = ddl.unwrap();
+                    assert!(
+                        sql.contains("CREATE SCHEMA"),
+                        "{}: should use SCHEMA: {}",
+                        dialect,
+                        sql
+                    );
+                }
+            }
+        }
+    }
 }
