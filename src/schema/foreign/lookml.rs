@@ -72,17 +72,16 @@ fn parse_lkml(content: &str) -> Result<Vec<(String, String, Vec<(String, LkmlVal
 }
 
 /// Strip LookML comments (# to end of line, but not inside strings).
+/// Handles escaped quotes (`\"`) within strings.
 fn strip_comments(content: &str) -> String {
     let mut result = String::new();
     let mut in_string = false;
+    let mut prev_char = '\0';
     let mut chars = content.chars().peekable();
 
     while let Some(c) = chars.next() {
-        if c == '"' && !in_string {
-            in_string = true;
-            result.push(c);
-        } else if c == '"' && in_string {
-            in_string = false;
+        if c == '"' && prev_char != '\\' {
+            in_string = !in_string;
             result.push(c);
         } else if c == '#' && !in_string {
             // Skip to end of line
@@ -93,9 +92,12 @@ fn strip_comments(content: &str) -> String {
                 chars.next();
             }
             result.push('\n');
+            prev_char = '\n';
+            continue;
         } else {
             result.push(c);
         }
+        prev_char = c;
     }
     result
 }
@@ -210,10 +212,12 @@ fn peek_until_brace_or_semicolons(chars: &[char], pos: &mut usize) -> String {
             break;
         }
         // Check for `{` — don't consume it (caller handles it).
-        // But skip `${` which is a LookML variable reference, not a block start.
+        // Skip `${` (LookML variable reference), `{%` and `{{` (Liquid templates).
         if !in_string && chars[*pos] == '{' {
             let prev_dollar = *pos > 0 && chars[*pos - 1] == '$';
-            if !prev_dollar {
+            let next_pct = *pos + 1 < chars.len() && chars[*pos + 1] == '%';
+            let next_brace = *pos + 1 < chars.len() && chars[*pos + 1] == '{';
+            if !prev_dollar && !next_pct && !next_brace {
                 break;
             }
         }
@@ -255,7 +259,10 @@ fn parse_list(chars: &[char], pos: &mut usize) -> Vec<String> {
     let mut items = Vec::new();
     loop {
         skip_whitespace(chars, pos);
-        if *pos >= chars.len() || chars[*pos] == ']' {
+        if *pos >= chars.len() {
+            break;
+        }
+        if chars[*pos] == ']' {
             *pos += 1;
             // Skip trailing ;;
             skip_semicolons(chars, pos);

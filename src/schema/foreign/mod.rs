@@ -41,7 +41,7 @@ impl ForeignFormat {
     /// File extensions typically used by this format.
     pub fn extensions(&self) -> &[&str] {
         match self {
-            Self::Cube => &["yml", "yaml", "js"],
+            Self::Cube => &["yml", "yaml"],
             Self::LookML => &["lkml"],
             Self::Dbt => &["yml", "yaml"],
             Self::Omni => &["yml", "yaml"],
@@ -171,34 +171,37 @@ pub fn detect_format(dir: &std::path::Path) -> Option<ForeignFormat> {
     let mut has_cubes = false;
     let mut has_semantic_models = false;
     let mut has_omni_views = false;
+    let mut has_omni_topics = false;
 
     for path in &yaml_files {
         if let Ok(content) = std::fs::read_to_string(path) {
-            // Quick line-scan for top-level keys (avoids full YAML parse)
+            // Quick line-scan for top-level keys (column 0, avoids full YAML parse)
             for line in content.lines() {
-                let trimmed = line.trim();
-                if trimmed == "cubes:" || trimmed.starts_with("cubes:") {
+                if line.starts_with("cubes:") {
                     has_cubes = true;
                 }
-                if trimmed == "semantic_models:" || trimmed.starts_with("semantic_models:") {
+                if line.starts_with("semantic_models:") {
                     has_semantic_models = true;
                 }
-                // Omni uses map-style `views:` with nested dimension maps
-                if trimmed == "views:" || trimmed.starts_with("views:") {
+                // Omni uses map-style `views:` + `topics:` at top level
+                if line.starts_with("views:") {
                     has_omni_views = true;
+                }
+                if line.starts_with("topics:") {
+                    has_omni_topics = true;
                 }
             }
         }
     }
 
-    // Priority: Cube > dbt > Omni (since views: is ambiguous)
+    // Priority: Cube > dbt > Omni (Omni requires both views: + topics:)
     if has_cubes {
         return Some(ForeignFormat::Cube);
     }
     if has_semantic_models {
         return Some(ForeignFormat::Dbt);
     }
-    if has_omni_views {
+    if has_omni_views && has_omni_topics {
         return Some(ForeignFormat::Omni);
     }
 
@@ -239,14 +242,14 @@ pub(crate) fn parse_foreign_measure_type(s: &str) -> MeasureType {
         "avg" | "average" => MeasureType::Average,
         "min" => MeasureType::Min,
         "max" => MeasureType::Max,
-        "count_distinct" | "countdistinct" | "countDistinct" => MeasureType::CountDistinct,
-        "count_distinct_approx" | "countdistinctapprox" | "countDistinctApprox" => {
-            MeasureType::CountDistinctApprox
-        }
+        "count_distinct" | "countdistinct" => MeasureType::CountDistinct,
+        "count_distinct_approx" | "countdistinctapprox" => MeasureType::CountDistinctApprox,
         "median" | "percentile" => MeasureType::Median,
         "number" => MeasureType::Number,
-        "run_total" | "runtotal" | "running_total" | "sum_boolean" => MeasureType::Sum,
-        "sum_distinct" | "average_distinct" => MeasureType::Average,
+        "run_total" | "runtotal" | "running_total" | "sum_boolean" | "sum_distinct" => {
+            MeasureType::Sum
+        }
+        "average_distinct" => MeasureType::Average,
         "list" | "string" => MeasureType::Custom,
         _ => MeasureType::Custom,
     }

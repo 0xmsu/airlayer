@@ -580,12 +580,20 @@ fn apply_metric(views: &mut [View], metric: &DbtMetric, warnings: &mut Vec<Strin
 }
 
 /// Rewrite derived metric expressions — replace metric aliases with references.
+/// Sorts by alias length (longest first) to prevent substring corruption.
 fn rewrite_dbt_metric_expr(expr: &str, inputs: &[DbtDerivedMetricInput]) -> String {
     let mut result = expr.to_string();
-    for input in inputs {
-        let alias = input.alias.as_deref().unwrap_or(&input.name);
-        // In MetricFlow derived expressions, metrics are referenced by name/alias directly
-        result = result.replace(alias, &format!("{{{{{}}}}}", input.name));
+    // Sort by alias length descending to prevent "revenue" matching inside "total_revenue"
+    let mut sorted: Vec<_> = inputs
+        .iter()
+        .map(|input| {
+            let alias = input.alias.as_deref().unwrap_or(&input.name);
+            (alias, &input.name)
+        })
+        .collect();
+    sorted.sort_by(|a, b| b.0.len().cmp(&a.0.len()));
+    for (alias, name) in sorted {
+        result = result.replace(alias, &format!("{{{{{}}}}}", name));
     }
     result
 }
