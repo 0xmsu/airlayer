@@ -97,6 +97,10 @@ pub enum Commands {
         /// Defaults to the first database in config.yml.
         #[arg(long)]
         datasource: Option<String>,
+
+        /// Skip pre-aggregation cache (local and warehouse), go straight to raw SQL.
+        #[arg(long)]
+        no_cache: bool,
     },
 
     /// Validate .view.yml files.
@@ -549,6 +553,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
             motif_param,
             execute,
             datasource,
+            no_cache,
         } => {
             // Check if this is a saved query file
             let is_named = name.is_some();
@@ -593,6 +598,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
                     motif,
                     motif_param,
                     datasource,
+                    no_cache,
                 );
             } else {
                 run_compile(
@@ -1831,6 +1837,7 @@ fn run_execute(
     motif: Option<String>,
     motif_param: Vec<String>,
     datasource: Option<String>,
+    no_cache: bool,
 ) {
     use crate::executor::QueryEnvelope;
 
@@ -1853,6 +1860,7 @@ fn run_execute(
         motif: Option<String>,
         motif_param: Vec<String>,
         datasource: Option<&str>,
+        no_cache: bool,
     ) -> Result<QueryEnvelope, QueryEnvelope> {
         let err = |stage, msg: String, sql: Option<String>, columns: &[_], views: Vec<String>| {
             QueryEnvelope::error(stage, msg, sql, columns, views)
@@ -1897,6 +1905,147 @@ fn run_execute(
                 views_used.clone(),
             )
         })?;
+
+        // --- Pre-aggregation cache resolution ---
+        if !no_cache {
+            // Layer 1: Check local Parquet cache
+            let cache_dir = ctx.base_dir.join(".airlayer").join("cache");
+            let manifest_path = cache_dir.join("manifest.json");
+            if manifest_path.is_file() {
+                if let Ok(manifest_content) = std::fs::read_to_string(&manifest_path) {
+                    if let Ok(local_manifest) = serde_json::from_str::<crate::engine::preagg::LocalManifest>(&manifest_content) {
+                        if let Some(entry) = crate::engine::preagg::check_coverage(&request, &local_manifest.rollups) {
+                            let parquet_path = cache_dir.join(&entry.file);
+                            if parquet_path.is_file() {
+                                #[cfg(feature = "exec-duckdb")]
+                                {
+                                    let parquet_str = parquet_path.to_str().unwrap_or("");
+                                    let reagg_sql = crate::engine::preagg::generate_reagg_sql(&request, entry, parquet_str);
+                                    if let Ok(duck_conn) = duckdb::Connection::open_in_memory() {
+                                        if let Ok(mut stmt) = duck_conn.prepare(&reagg_sql) {
+                                            let columns: Vec<String> = (0..stmt.column_count())
+                                                .map(|i| stmt.column_name(i).map_or("?", |v| v).to_string())
+                                                .collect();
+                                            if let Ok(mut duckdb_rows) = stmt.query([]) {
+                                                let mut rows = Vec::new();
+                                                loop {
+                                                    match duckdb_rows.next() {
+                                                        Ok(Some(row)) => {
+                                                            let mut obj = serde_json::Map::new();
+                                                            for (i, col) in columns.iter().enumerate() {
+                                                                let val = crate::executor::duckdb::duckdb_value_to_json(row, i);
+                                                                obj.insert(col.clone(), val);
+                                                            }
+                                                            rows.push(obj);
+                                                        }
+                                                        Ok(None) => break,
+                                                        Err(_) => break,
+                                                    }
+                                                }
+                                                let exec_result = crate::executor::ExecutionResult { columns, rows };
+                                                return Ok(QueryEnvelope::success(
+                                                    result.sql, &result.columns, exec_result, views_used,
+                                                ));
+                                            }
+                                        }
+                                    }
+                                    // If DuckDB fails, fall through silently to next layer
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Layer 2: Check warehouse pre-agg tables
+            // Only attempt if we have a config path
+            if let Some(config_path) = ctx.config_path.as_ref() {
+                if let Ok(content) = std::fs::read_to_string(config_path) {
+                    if let Ok(partial) = serde_yaml::from_str::<PartialConfig>(&content) {
+                        if let Ok(exec_config) = serde_yaml::from_str::<crate::executor::ExecutionConfig>(&content) {
+                            let connection_result = if let Some(ds) = datasource {
+                                exec_config.find_connection(ds)
+                            } else {
+                                exec_config.first_connection()
+                            };
+                            if let Ok(ref connection) = connection_result {
+                                let preagg_schema = partial.pre_aggregations
+                                    .as_ref()
+                                    .and_then(|pa| pa.schema.clone())
+                                    .unwrap_or_else(|| "AIRLAYER".to_string());
+
+                                // Detect ClickHouse using the selected datasource (not just the first)
+                                let is_clickhouse = if let Some(ds) = datasource {
+                                    partial.databases.iter()
+                                        .find(|d| d.name == ds)
+                                        .map(|d| d.db_type.as_str()) == Some("clickhouse")
+                                } else {
+                                    partial.databases.first()
+                                        .map(|d| d.db_type.as_str()) == Some("clickhouse")
+                                };
+
+                                let manifest_sql = format!(
+                                    "SELECT view_name, rollup_name, rollup_hash, table_name, \
+                                     dimensions, measures, time_dimension, granularity, build_date \
+                                     FROM {}.{}{}",
+                                    preagg_schema, "__manifest",
+                                    if is_clickhouse { " FINAL" } else { "" }
+                                );
+                                if let Ok(manifest_result) = crate::executor::execute(connection, &manifest_sql, &[]) {
+                                    let rollup_entries: Vec<crate::engine::preagg::LocalRollupEntry> = manifest_result.rows.iter()
+                                        .filter_map(|row| {
+                                            Some(crate::engine::preagg::LocalRollupEntry {
+                                                view_name: row.get("view_name")?.as_str()?.to_string(),
+                                                rollup_name: row.get("rollup_name")?.as_str()?.to_string(),
+                                                rollup_hash: row.get("rollup_hash")?.as_str()?.to_string(),
+                                                file: String::new(),
+                                                dimensions: serde_json::from_str(row.get("dimensions")?.as_str()?).unwrap_or_default(),
+                                                measures: serde_json::from_str(row.get("measures")?.as_str()?).unwrap_or_default(),
+                                                time_dimension: row.get("time_dimension").and_then(|v| v.as_str()).filter(|s| !s.is_empty()).map(|s| s.to_string()),
+                                                granularity: row.get("granularity").and_then(|v| v.as_str()).filter(|s| !s.is_empty()).map(|s| s.to_string()),
+                                                build_date: row.get("build_date").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                                            })
+                                        })
+                                        .collect();
+
+                                    if let Some(entry) = crate::engine::preagg::check_coverage(&request, &rollup_entries) {
+                                        // Get the actual table name from the manifest
+                                        let actual_table = manifest_result.rows.iter()
+                                            .find(|row| {
+                                                row.get("rollup_hash").and_then(|v| v.as_str()) == Some(&entry.rollup_hash) &&
+                                                row.get("view_name").and_then(|v| v.as_str()) == Some(&entry.view_name)
+                                            })
+                                            .and_then(|row| row.get("table_name").and_then(|v| v.as_str()))
+                                            .unwrap_or("");
+
+                                        if !actual_table.is_empty() {
+                                            // TODO: pass the actual resolved dialect once
+                                            // generate_warehouse_reagg_sql is dialect-aware.
+                                            // Currently the function ignores the dialect argument
+                                            // and always generates DuckDB-flavored SQL with table
+                                            // substitution, so ClickHouse is a safe placeholder.
+                                            let reagg_sql = crate::engine::preagg::generate_warehouse_reagg_sql(
+                                                &request, entry, actual_table,
+                                                &crate::dialect::Dialect::ClickHouse,
+                                            );
+
+                                            if let Ok(exec_result) = crate::executor::execute(connection, &reagg_sql, &[]) {
+                                                return Ok(QueryEnvelope::success(
+                                                    result.sql, &result.columns, exec_result, views_used,
+                                                ));
+                                            }
+                                        }
+                                        // If warehouse pre-agg fails, fall through to raw SQL
+                                    }
+                                }
+                                // If manifest read fails (table doesn't exist), fall through silently
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        // --- End pre-aggregation cache resolution ---
 
         // Stage 4: resolve connection & execute
         let config_path = ctx.config_path.as_ref().ok_or_else(|| {
@@ -1979,6 +2128,7 @@ fn run_execute(
         motif,
         motif_param,
         datasource.as_deref(),
+        no_cache,
     ) {
         Ok(env) => {
             is_error = false;
