@@ -2062,7 +2062,7 @@ mod tests {
             vec![
                 View {
                     name: "orders".to_string(),
-                    description: "Orders".to_string(),
+                    description: Some("Orders".to_string()),
                     label: None,
                     datasource: None,
                     dialect: None,
@@ -2195,7 +2195,7 @@ mod tests {
                 },
                 View {
                     name: "customers".to_string(),
-                    description: "Customers".to_string(),
+                    description: Some("Customers".to_string()),
                     label: None,
                     datasource: None,
                     dialect: None,
@@ -2435,7 +2435,7 @@ mod tests {
         let layer = SemanticLayer::new(
             vec![View {
                 name: "orders".to_string(),
-                description: "Orders".to_string(),
+                description: Some("Orders".to_string()),
                 label: None,
                 datasource: None,
                 dialect: None,
@@ -2496,7 +2496,7 @@ mod tests {
         let layer = SemanticLayer::new(
             vec![View {
                 name: "orders".to_string(),
-                description: "Orders".to_string(),
+                description: Some("Orders".to_string()),
                 label: None,
                 datasource: None,
                 dialect: None,
@@ -2563,7 +2563,7 @@ mod tests {
             vec![
                 View {
                     name: "orders".to_string(),
-                    description: "Orders".to_string(),
+                    description: Some("Orders".to_string()),
                     label: None,
                     datasource: None,
                     dialect: None,
@@ -2653,7 +2653,7 @@ mod tests {
                 },
                 View {
                     name: "order_items".to_string(),
-                    description: "Order line items".to_string(),
+                    description: Some("Order line items".to_string()),
                     label: None,
                     datasource: None,
                     dialect: None,
@@ -3354,7 +3354,7 @@ mod tests {
         let layer = SemanticLayer::new(
             vec![View {
                 name: "derived".to_string(),
-                description: "Derived".to_string(),
+                description: Some("Derived".to_string()),
                 label: None,
                 datasource: None,
                 dialect: None,
@@ -3422,7 +3422,7 @@ mod tests {
         let layer = SemanticLayer::new(
             vec![View {
                 name: "orders".to_string(),
-                description: "Orders".to_string(),
+                description: Some("Orders".to_string()),
                 label: None,
                 datasource: None,
                 dialect: None,
@@ -3577,7 +3577,7 @@ mod tests {
             vec![
                 View {
                     name: "departments".to_string(),
-                    description: "Departments".to_string(),
+                    description: Some("Departments".to_string()),
                     label: None,
                     datasource: None,
                     dialect: None,
@@ -3612,7 +3612,7 @@ mod tests {
                 },
                 View {
                     name: "employees".to_string(),
-                    description: "Employees".to_string(),
+                    description: Some("Employees".to_string()),
                     label: None,
                     datasource: None,
                     dialect: None,
@@ -3670,7 +3670,7 @@ mod tests {
                 },
                 View {
                     name: "timesheets".to_string(),
-                    description: "Timesheets".to_string(),
+                    description: Some("Timesheets".to_string()),
                     label: None,
                     datasource: None,
                     dialect: None,
@@ -3772,7 +3772,7 @@ mod tests {
         let layer = SemanticLayer::new(
             vec![View {
                 name: "events".to_string(),
-                description: "Events".to_string(),
+                description: Some("Events".to_string()),
                 label: None,
                 datasource: None,
                 dialect: None,
@@ -3869,7 +3869,7 @@ mod tests {
         let layer = SemanticLayer::new(
             vec![View {
                 name: "orders".to_string(),
-                description: "Orders".to_string(),
+                description: Some("Orders".to_string()),
                 label: None,
                 datasource: None,
                 dialect: None,
@@ -4005,7 +4005,7 @@ mod tests {
             vec![
                 View {
                     name: "a".to_string(),
-                    description: "A".to_string(),
+                    description: Some("A".to_string()),
                     label: None,
                     datasource: None,
                     dialect: None,
@@ -4040,7 +4040,7 @@ mod tests {
                 },
                 View {
                     name: "b".to_string(),
-                    description: "B".to_string(),
+                    description: Some("B".to_string()),
                     label: None,
                     datasource: None,
                     dialect: None,
@@ -4098,7 +4098,7 @@ mod tests {
                 },
                 View {
                     name: "c".to_string(),
-                    description: "C".to_string(),
+                    description: Some("C".to_string()),
                     label: None,
                     datasource: None,
                     dialect: None,
@@ -4311,7 +4311,7 @@ mod tests {
         let layer = SemanticLayer::new(
             vec![View {
                 name: "events".to_string(),
-                description: "Events".to_string(),
+                description: Some("Events".to_string()),
                 label: None,
                 datasource: None,
                 dialect: None,
@@ -4372,7 +4372,7 @@ mod tests {
         let layer = SemanticLayer::new(
             vec![View {
                 name: "stats".to_string(),
-                description: "Stats".to_string(),
+                description: Some("Stats".to_string()),
                 label: None,
                 datasource: None,
                 dialect: None,
@@ -4469,7 +4469,7 @@ mod tests {
         let layer = SemanticLayer::new(
             vec![View {
                 name: "sales".to_string(),
-                description: "Sales".to_string(),
+                description: Some("Sales".to_string()),
                 label: None,
                 datasource: None,
                 dialect: None,
@@ -4545,7 +4545,7 @@ mod tests {
         let layer = SemanticLayer::new(
             vec![View {
                 name: "orders".to_string(),
-                description: "Orders".to_string(),
+                description: Some("Orders".to_string()),
                 label: None,
                 datasource: None,
                 dialect: None,
@@ -4650,7 +4650,7 @@ mod tests {
             vec![
                 View {
                     name: "customers".to_string(),
-                    description: "Customers".to_string(),
+                    description: Some("Customers".to_string()),
                     label: None,
                     datasource: None,
                     dialect: None,
@@ -4712,7 +4712,7 @@ mod tests {
                 },
                 View {
                     name: "orders".to_string(),
-                    description: "Orders".to_string(),
+                    description: Some("Orders".to_string()),
                     label: None,
                     datasource: None,
                     dialect: None,
@@ -4922,7 +4922,7 @@ mod tests {
         let layer = SemanticLayer::new(
             vec![View {
                 name: "sales".to_string(),
-                description: "Sales".to_string(),
+                description: Some("Sales".to_string()),
                 label: None,
                 datasource: None,
                 dialect: None,
@@ -4993,7 +4993,7 @@ mod tests {
         let layer = SemanticLayer::new(
             vec![View {
                 name: "events".to_string(),
-                description: "Events".to_string(),
+                description: Some("Events".to_string()),
                 label: None,
                 datasource: None,
                 dialect: None,
@@ -5055,7 +5055,7 @@ mod tests {
         let layer = SemanticLayer::new(
             vec![View {
                 name: "events".to_string(),
-                description: "Events".to_string(),
+                description: Some("Events".to_string()),
                 label: None,
                 datasource: None,
                 dialect: None,
@@ -5214,7 +5214,7 @@ mod tests {
             vec![
                 View {
                     name: "order_items".to_string(),
-                    description: "Order Items".to_string(),
+                    description: Some("Order Items".to_string()),
                     label: None,
                     datasource: None,
                     dialect: None,
@@ -5289,7 +5289,7 @@ mod tests {
                 },
                 View {
                     name: "returns".to_string(),
-                    description: "Returns".to_string(),
+                    description: Some("Returns".to_string()),
                     label: None,
                     datasource: None,
                     dialect: None,
@@ -5450,7 +5450,7 @@ mod tests {
         let layer = SemanticLayer::new(
             vec![View {
                 name: "events".to_string(),
-                description: "Events".to_string(),
+                description: Some("Events".to_string()),
                 label: None,
                 datasource: None,
                 dialect: None,
@@ -5533,7 +5533,7 @@ mod tests {
         let layer = SemanticLayer::new(
             vec![View {
                 name: "orders".to_string(),
-                description: "Orders".to_string(),
+                description: Some("Orders".to_string()),
                 label: None,
                 datasource: None,
                 dialect: None,
@@ -5596,7 +5596,7 @@ mod tests {
         let layer = SemanticLayer::new(
             vec![View {
                 name: "orders".to_string(),
-                description: "Orders".to_string(),
+                description: Some("Orders".to_string()),
                 label: None,
                 datasource: None,
                 dialect: None,
@@ -5667,7 +5667,7 @@ mod tests {
             vec![
                 View {
                     name: "macro".to_string(),
-                    description: "Macro tracking".to_string(),
+                    description: Some("Macro tracking".to_string()),
                     label: None,
                     datasource: None,
                     dialect: None,
@@ -5715,7 +5715,7 @@ mod tests {
                 },
                 View {
                     name: "cardio".to_string(),
-                    description: "Cardio tracking".to_string(),
+                    description: Some("Cardio tracking".to_string()),
                     label: None,
                     datasource: None,
                     dialect: None,
@@ -5806,7 +5806,7 @@ mod tests {
         let layer = SemanticLayer::new(
             vec![View {
                 name: "orders".to_string(),
-                description: "Orders".to_string(),
+                description: Some("Orders".to_string()),
                 label: None,
                 datasource: None,
                 dialect: None,
@@ -5882,7 +5882,7 @@ mod tests {
         let layer = SemanticLayer::new(
             vec![View {
                 name: "orders".to_string(),
-                description: "Orders".to_string(),
+                description: Some("Orders".to_string()),
                 label: None,
                 datasource: None,
                 dialect: None,
@@ -5963,7 +5963,7 @@ mod tests {
         let layer = SemanticLayer::new(
             vec![View {
                 name: "revenue".to_string(),
-                description: "Revenue".to_string(),
+                description: Some("Revenue".to_string()),
                 label: None,
                 datasource: None,
                 dialect: None,
@@ -6116,7 +6116,7 @@ mod tests {
         let layer = SemanticLayer::new(
             vec![View {
                 name: "products".to_string(),
-                description: "Products".to_string(),
+                description: Some("Products".to_string()),
                 label: None,
                 datasource: None,
                 dialect: None,
@@ -6219,7 +6219,7 @@ mod tests {
         let layer = SemanticLayer::new(
             vec![View {
                 name: "orders".to_string(),
-                description: "Orders".to_string(),
+                description: Some("Orders".to_string()),
                 label: None,
                 datasource: None,
                 dialect: None,
@@ -6321,7 +6321,7 @@ mod tests {
         let layer = SemanticLayer::new(
             vec![View {
                 name: "metrics".to_string(),
-                description: "Metrics".to_string(),
+                description: Some("Metrics".to_string()),
                 label: None,
                 datasource: None,
                 dialect: None,
@@ -6405,7 +6405,7 @@ mod tests {
         let layer = SemanticLayer::new(
             vec![View {
                 name: "orders".to_string(),
-                description: "Orders".to_string(),
+                description: Some("Orders".to_string()),
                 label: None,
                 datasource: None,
                 dialect: None,

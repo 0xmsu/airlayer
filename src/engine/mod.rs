@@ -346,7 +346,7 @@ databases:
     fn simple_view_with_dialect(name: &str, dialect: Option<&str>) -> View {
         View {
             name: name.to_string(),
-            description: "test".to_string(),
+            description: Some("test".to_string()),
             label: None,
             datasource: None,
             dialect: dialect.map(|s| s.to_string()),
