@@ -123,7 +123,11 @@ fn generate_default_rollup(view: &View) -> RollupSpec {
     let measures: Vec<RollupMeasure> = view
         .measures_list()
         .iter()
-        .filter(|m| m.measure_type != MeasureType::Custom)
+        .filter(|m| {
+            m.measure_type != MeasureType::Custom
+                && m.measure_type != MeasureType::Number
+                && m.measure_type != MeasureType::Median
+        })
         .map(build_rollup_measure)
         .collect();
 
@@ -479,10 +483,160 @@ pub fn check_coverage<'a>(
     rollups.iter().find(|entry| covers(request, entry))
 }
 
+/// Recursively collect member names from a filter tree.
+fn collect_filter_members(filter: &crate::engine::query::QueryFilter, members: &mut Vec<String>) {
+    if let Some(ref member) = filter.member {
+        members.push(member.clone());
+    }
+    if let Some(ref and) = filter.and {
+        for f in and {
+            collect_filter_members(f, members);
+        }
+    }
+    if let Some(ref or) = filter.or {
+        for f in or {
+            collect_filter_members(f, members);
+        }
+    }
+}
+
+/// Generate a WHERE clause fragment for a single filter, using quoted column names.
+/// Returns None if the filter cannot be translated.
+fn render_filter_sql(
+    filter: &crate::engine::query::QueryFilter,
+    entry: &LocalRollupEntry,
+    quote: &dyn Fn(&str) -> String,
+) -> Option<String> {
+    use crate::engine::query::FilterOperator;
+
+    if let (Some(ref member), Some(ref op)) = (&filter.member, &filter.operator) {
+        let dim_name = member.split('.').nth(1).unwrap_or(member);
+        // Resolve the column name in the rollup table
+        let col = if entry.dimensions.contains(&dim_name.to_string()) {
+            quote(dim_name)
+        } else if entry.time_dimension.as_deref() == Some(dim_name) {
+            if let Some(ref gran) = entry.granularity {
+                quote(&format!("{}__{}", dim_name, gran))
+            } else {
+                quote(dim_name)
+            }
+        } else {
+            return None;
+        };
+
+        let vals: Vec<String> = filter
+            .values
+            .iter()
+            .map(|v| format!("'{}'", v.replace('\'', "''")))
+            .collect();
+
+        let sql = match op {
+            FilterOperator::Equals => {
+                if vals.len() == 1 {
+                    format!("{} = {}", col, vals[0])
+                } else {
+                    format!("{} IN ({})", col, vals.join(", "))
+                }
+            }
+            FilterOperator::NotEquals => {
+                if vals.len() == 1 {
+                    format!("{} <> {}", col, vals[0])
+                } else {
+                    format!("{} NOT IN ({})", col, vals.join(", "))
+                }
+            }
+            FilterOperator::Gt => format!("{} > {}", col, vals.first().unwrap_or(&"NULL".into())),
+            FilterOperator::Gte => {
+                format!("{} >= {}", col, vals.first().unwrap_or(&"NULL".into()))
+            }
+            FilterOperator::Lt => format!("{} < {}", col, vals.first().unwrap_or(&"NULL".into())),
+            FilterOperator::Lte => {
+                format!("{} <= {}", col, vals.first().unwrap_or(&"NULL".into()))
+            }
+            FilterOperator::Set => format!("{} IS NOT NULL", col),
+            FilterOperator::NotSet => format!("{} IS NULL", col),
+            FilterOperator::Contains => format!(
+                "{} LIKE '%{}%'",
+                col,
+                filter
+                    .values
+                    .first()
+                    .unwrap_or(&String::new())
+                    .replace('\'', "''")
+            ),
+            FilterOperator::NotContains => format!(
+                "{} NOT LIKE '%{}%'",
+                col,
+                filter
+                    .values
+                    .first()
+                    .unwrap_or(&String::new())
+                    .replace('\'', "''")
+            ),
+            _ => return None, // date-range filters not supported in reagg
+        };
+        Some(sql)
+    } else if let Some(ref and) = filter.and {
+        let parts: Vec<String> = and
+            .iter()
+            .filter_map(|f| render_filter_sql(f, entry, quote))
+            .collect();
+        if parts.is_empty() {
+            None
+        } else {
+            Some(format!("({})", parts.join(" AND ")))
+        }
+    } else if let Some(ref or) = filter.or {
+        let parts: Vec<String> = or
+            .iter()
+            .filter_map(|f| render_filter_sql(f, entry, quote))
+            .collect();
+        if parts.is_empty() {
+            None
+        } else {
+            Some(format!("({})", parts.join(" OR ")))
+        }
+    } else {
+        None
+    }
+}
+
+/// Build a WHERE clause from request filters for re-aggregation queries.
+fn build_reagg_where_clause(
+    request: &crate::engine::query::QueryRequest,
+    entry: &LocalRollupEntry,
+    quote: &dyn Fn(&str) -> String,
+) -> String {
+    let parts: Vec<String> = request
+        .filters
+        .iter()
+        .filter_map(|f| render_filter_sql(f, entry, quote))
+        .collect();
+    if parts.is_empty() {
+        String::new()
+    } else {
+        format!("\nWHERE {}", parts.join(" AND "))
+    }
+}
+
 fn covers(request: &crate::engine::query::QueryRequest, entry: &LocalRollupEntry) -> bool {
-    // Queries with filters cannot be served from cache (filter propagation not yet supported)
+    // Check that all filter dimensions exist in the rollup
     if !request.filters.is_empty() {
-        return false;
+        let mut filter_members = Vec::new();
+        for f in &request.filters {
+            collect_filter_members(f, &mut filter_members);
+        }
+        for member in &filter_members {
+            let dim_name = member.split('.').nth(1).unwrap_or(member);
+            let in_dims = entry.dimensions.contains(&dim_name.to_string());
+            let in_time = entry
+                .time_dimension
+                .as_deref()
+                .is_some_and(|td| td == dim_name);
+            if !in_dims && !in_time {
+                return false;
+            }
+        }
     }
 
     // Extract view names from all member references
@@ -516,8 +670,8 @@ fn covers(request: &crate::engine::query::QueryRequest, entry: &LocalRollupEntry
     for measure in &request.measures {
         let measure_name = measure.split('.').nth(1).unwrap_or(measure);
         if let Some(&(_, mtype)) = rollup_measures.iter().find(|(n, _)| *n == measure_name) {
-            // Reject if the stored type is custom (not pre-aggregable)
-            if mtype == "custom" {
+            // Reject types that cannot be re-aggregated
+            if mtype == "custom" || mtype == "number" || mtype == "median" {
                 return false;
             }
         } else {
@@ -698,6 +852,7 @@ pub fn generate_reagg_sql(
     }
 
     let select = select_cols.join(", ");
+    let where_clause = build_reagg_where_clause(request, entry, &|name| format!("\"{}\"", name));
     let group_by = if group_by_cols.is_empty() {
         String::new()
     } else {
@@ -714,24 +869,185 @@ pub fn generate_reagg_sql(
         .unwrap_or_default();
 
     format!(
-        "SELECT {select}\nFROM read_parquet('{path}'){group_by}{limit}{offset}",
+        "SELECT {select}\nFROM read_parquet('{path}'){where_clause}{group_by}{limit}{offset}",
         path = parquet_path.replace('\'', "''"),
     )
 }
 
-/// Generate a warehouse SQL query that reads from the pre-aggregated table.
-///
-/// Note: this currently generates DuckDB-flavored SQL (standard `date_trunc`, `MEDIAN`, etc.)
-/// and substitutes the table name in place of `read_parquet(...)`. The `dialect` parameter is
-/// reserved for future dialect-aware SQL generation; it is not yet used.
+/// Generate a dialect-aware SQL query that reads from a pre-aggregated warehouse table.
 pub fn generate_warehouse_reagg_sql(
     request: &crate::engine::query::QueryRequest,
     entry: &LocalRollupEntry,
     table_name: &str,
-    _dialect: &Dialect,
+    dialect: &Dialect,
 ) -> String {
-    let parquet_sql = generate_reagg_sql(request, entry, "__placeholder__");
-    parquet_sql.replace("read_parquet('__placeholder__')", table_name)
+    let mut select_cols: Vec<String> = Vec::new();
+    let mut group_by_cols: Vec<String> = Vec::new();
+
+    // 1. Dimensions
+    for dim in &request.dimensions {
+        let dim_name = dim.split('.').nth(1).unwrap_or(dim);
+        let alias = dim.replace('.', "__");
+        let col = dialect.quote_identifier(dim_name);
+        let alias_q = dialect.quote_identifier(&alias);
+        select_cols.push(format!("{} AS {}", col, alias_q));
+        group_by_cols.push(col);
+    }
+
+    // 2. Time dimensions
+    for td in &request.time_dimensions {
+        let td_name = td.dimension.split('.').nth(1).unwrap_or(&td.dimension);
+        let alias = td.dimension.replace('.', "__");
+        let alias_q = dialect.quote_identifier(&alias);
+        if let Some(ref gran) = td.granularity {
+            if let Some(ref stored_gran) = entry.granularity {
+                let stored_col_name = format!("{}__{}", td_name, stored_gran);
+                let stored_col = dialect.quote_identifier(&stored_col_name);
+                if gran == stored_gran {
+                    select_cols.push(format!("{} AS {}", stored_col, alias_q));
+                    group_by_cols.push(stored_col);
+                } else {
+                    let trunc = dialect.date_trunc(gran, &stored_col);
+                    select_cols.push(format!("{} AS {}", trunc, alias_q));
+                    group_by_cols.push(trunc);
+                }
+            }
+        } else {
+            let col = if let Some(ref stored_gran) = entry.granularity {
+                dialect.quote_identifier(&format!("{}__{}", td_name, stored_gran))
+            } else {
+                dialect.quote_identifier(td_name)
+            };
+            select_cols.push(format!("{} AS {}", col, alias_q));
+            group_by_cols.push(col);
+        }
+    }
+
+    // 3. Measures (re-aggregated)
+    for measure in &request.measures {
+        let measure_name = measure.split('.').nth(1).unwrap_or(measure);
+        let alias = measure.replace('.', "__");
+        let alias_q = dialect.quote_identifier(&alias);
+
+        if let Some(m_meta) = entry
+            .measures
+            .iter()
+            .find(|m| m.get("name").and_then(|n| n.as_str()) == Some(measure_name))
+        {
+            let m_type = m_meta.get("type").and_then(|t| t.as_str()).unwrap_or("");
+            let columns: Vec<String> = m_meta
+                .get("columns")
+                .and_then(|c| c.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                        .collect()
+                })
+                .unwrap_or_default();
+
+            match m_type {
+                "sum" => {
+                    let col = dialect.quote_identifier(
+                        &columns
+                            .first()
+                            .cloned()
+                            .unwrap_or_else(|| format!("{}__sum", measure_name)),
+                    );
+                    select_cols.push(format!("SUM({}) AS {}", col, alias_q));
+                }
+                "count" => {
+                    let col = dialect.quote_identifier(
+                        &columns
+                            .first()
+                            .cloned()
+                            .unwrap_or_else(|| format!("{}__count", measure_name)),
+                    );
+                    select_cols.push(format!("SUM({}) AS {}", col, alias_q));
+                }
+                "average" => {
+                    let sum_col = dialect.quote_identifier(
+                        &columns
+                            .first()
+                            .cloned()
+                            .unwrap_or_else(|| format!("{}__sum", measure_name)),
+                    );
+                    let count_col = dialect.quote_identifier(
+                        &columns
+                            .get(1)
+                            .cloned()
+                            .unwrap_or_else(|| format!("{}__count", measure_name)),
+                    );
+                    let sum_expr = format!("SUM({})", sum_col);
+                    let count_expr = format!("NULLIF(SUM({}), 0)", count_col);
+                    select_cols.push(format!(
+                        "{} / {} AS {}",
+                        dialect.cast_to_double(&sum_expr),
+                        count_expr,
+                        alias_q,
+                    ));
+                }
+                "min" => {
+                    let col = dialect.quote_identifier(
+                        &columns
+                            .first()
+                            .cloned()
+                            .unwrap_or_else(|| format!("{}__min", measure_name)),
+                    );
+                    select_cols.push(format!("MIN({}) AS {}", col, alias_q));
+                }
+                "max" => {
+                    let col = dialect.quote_identifier(
+                        &columns
+                            .first()
+                            .cloned()
+                            .unwrap_or_else(|| format!("{}__max", measure_name)),
+                    );
+                    select_cols.push(format!("MAX({}) AS {}", col, alias_q));
+                }
+                "count_distinct" | "count_distinct_approx" => {
+                    let col = dialect.quote_identifier(
+                        &columns
+                            .first()
+                            .cloned()
+                            .unwrap_or_else(|| measure_name.to_string()),
+                    );
+                    select_cols.push(format!("COUNT(DISTINCT {}) AS {}", col, alias_q));
+                }
+                _ => {
+                    select_cols.push(format!("NULL AS {}", alias_q));
+                }
+            }
+        }
+    }
+
+    let select = select_cols.join(", ");
+    let dialect_clone = dialect.clone();
+    let where_clause =
+        build_reagg_where_clause(request, entry, &|name| dialect_clone.quote_identifier(name));
+    let group_by = if group_by_cols.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "\nGROUP BY {}",
+            group_by_cols
+                .iter()
+                .enumerate()
+                .map(|(i, _)| format!("{}", i + 1))
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    };
+
+    let limit = request
+        .limit
+        .map(|l| format!("\nLIMIT {}", l))
+        .unwrap_or_default();
+    let offset = request
+        .offset
+        .map(|o| format!("\nOFFSET {}", o))
+        .unwrap_or_default();
+
+    format!("SELECT {select}\nFROM {table_name}{where_clause}{group_by}{limit}{offset}",)
 }
 
 /// Build a ManifestEntry from a view and rollup spec.
@@ -1384,5 +1700,283 @@ mod tests {
         };
         let result = check_coverage(&request, &rollups);
         assert!(result.is_none(), "Expected no coverage match");
+    }
+
+    #[test]
+    fn test_coverage_rejects_median_and_number_measures() {
+        let entry = LocalRollupEntry {
+            view_name: "orders".into(),
+            rollup_name: "test".into(),
+            rollup_hash: "abc".into(),
+            file: "test.parquet".into(),
+            dimensions: vec!["region".into()],
+            measures: vec![
+                serde_json::json!({"name": "med_rev", "type": "median", "columns": ["revenue", "revenue__freq"]}),
+                serde_json::json!({"name": "computed", "type": "number", "columns": ["computed__value"]}),
+            ],
+            time_dimension: None,
+            granularity: None,
+            build_date: "2026-04-16".into(),
+        };
+        let rollups = [entry];
+
+        let request = QueryRequest {
+            measures: vec!["orders.med_rev".to_string()],
+            ..QueryRequest::new()
+        };
+        assert!(
+            check_coverage(&request, &rollups).is_none(),
+            "Median should not be covered"
+        );
+
+        let request = QueryRequest {
+            measures: vec!["orders.computed".to_string()],
+            ..QueryRequest::new()
+        };
+        assert!(
+            check_coverage(&request, &rollups).is_none(),
+            "Number should not be covered"
+        );
+    }
+
+    #[test]
+    fn test_coverage_allows_filtered_query_when_dim_in_rollup() {
+        use crate::engine::query::{FilterOperator, QueryFilter};
+        let entry = test_local_rollup_entry();
+        let rollups = [entry];
+        let request = QueryRequest {
+            measures: vec!["orders.total_revenue".to_string()],
+            dimensions: vec!["orders.region".to_string()],
+            filters: vec![QueryFilter {
+                member: Some("orders.region".to_string()),
+                operator: Some(FilterOperator::Equals),
+                values: vec!["US".to_string()],
+                and: None,
+                or: None,
+            }],
+            ..QueryRequest::new()
+        };
+        let result = check_coverage(&request, &rollups);
+        assert!(
+            result.is_some(),
+            "Filter on rollup dimension should be covered"
+        );
+    }
+
+    #[test]
+    fn test_coverage_rejects_filter_on_missing_dim() {
+        use crate::engine::query::{FilterOperator, QueryFilter};
+        let entry = test_local_rollup_entry();
+        let rollups = [entry];
+        let request = QueryRequest {
+            measures: vec!["orders.total_revenue".to_string()],
+            filters: vec![QueryFilter {
+                member: Some("orders.status".to_string()), // Not in rollup
+                operator: Some(FilterOperator::Equals),
+                values: vec!["active".to_string()],
+                and: None,
+                or: None,
+            }],
+            ..QueryRequest::new()
+        };
+        let result = check_coverage(&request, &rollups);
+        assert!(
+            result.is_none(),
+            "Filter on non-rollup dimension should not be covered"
+        );
+    }
+
+    #[test]
+    fn test_reagg_sql_with_filter() {
+        use crate::engine::query::{FilterOperator, QueryFilter};
+        let entry = test_local_rollup_entry();
+        let request = QueryRequest {
+            measures: vec!["orders.total_revenue".to_string()],
+            dimensions: vec!["orders.region".to_string()],
+            filters: vec![QueryFilter {
+                member: Some("orders.region".to_string()),
+                operator: Some(FilterOperator::Equals),
+                values: vec!["US".to_string()],
+                and: None,
+                or: None,
+            }],
+            ..QueryRequest::new()
+        };
+        let sql = generate_reagg_sql(&request, &entry, "/data/orders.parquet");
+        assert!(
+            sql.contains("WHERE \"region\" = 'US'"),
+            "Missing WHERE clause: {}",
+            sql
+        );
+    }
+
+    #[test]
+    fn test_warehouse_reagg_sql_dialect_aware() {
+        let entry = test_local_rollup_entry();
+        let request = QueryRequest {
+            measures: vec!["orders.total_revenue".to_string()],
+            dimensions: vec!["orders.region".to_string()],
+            ..QueryRequest::new()
+        };
+        // Postgres should use double-quote identifiers
+        let sql = generate_warehouse_reagg_sql(
+            &request,
+            &entry,
+            "\"preagg\".\"orders__abc__20260415\"",
+            &crate::dialect::Dialect::Postgres,
+        );
+        assert!(
+            sql.contains("\"region\""),
+            "Should use double-quote identifiers: {}",
+            sql
+        );
+        assert!(
+            sql.contains("SUM(\"total_revenue__sum\")"),
+            "Should have SUM re-agg: {}",
+            sql
+        );
+
+        // BigQuery should use backtick identifiers
+        let sql = generate_warehouse_reagg_sql(
+            &request,
+            &entry,
+            "`my_dataset`.`orders__abc__20260415`",
+            &crate::dialect::Dialect::BigQuery,
+        );
+        assert!(
+            sql.contains("`region`"),
+            "Should use backtick identifiers: {}",
+            sql
+        );
+    }
+
+    #[test]
+    fn test_warehouse_reagg_sql_average_uses_cast() {
+        let entry = LocalRollupEntry {
+            view_name: "orders".into(),
+            rollup_name: "test".into(),
+            rollup_hash: "abc".into(),
+            file: "test.parquet".into(),
+            dimensions: vec![],
+            measures: vec![serde_json::json!({
+                "name": "avg_rev", "type": "average",
+                "columns": ["avg_rev__sum", "avg_rev__count"]
+            })],
+            time_dimension: None,
+            granularity: None,
+            build_date: "2026-04-16".into(),
+        };
+        let request = QueryRequest {
+            measures: vec!["orders.avg_rev".to_string()],
+            ..QueryRequest::new()
+        };
+        let sql = generate_warehouse_reagg_sql(
+            &request,
+            &entry,
+            "preagg.test",
+            &crate::dialect::Dialect::Postgres,
+        );
+        assert!(
+            sql.contains("CAST(SUM(\"avg_rev__sum\") AS DOUBLE PRECISION)"),
+            "Postgres should use DOUBLE PRECISION: {}",
+            sql
+        );
+
+        let sql = generate_warehouse_reagg_sql(
+            &request,
+            &entry,
+            "preagg.test",
+            &crate::dialect::Dialect::BigQuery,
+        );
+        assert!(
+            sql.contains("CAST(SUM(`avg_rev__sum`) AS FLOAT64)"),
+            "BigQuery should use FLOAT64: {}",
+            sql
+        );
+    }
+
+    #[test]
+    fn test_default_rollup_excludes_median_and_number() {
+        use crate::schema::models::*;
+        let view = View {
+            name: "test".into(),
+            description: Some("test".into()),
+            label: None,
+            datasource: None,
+            dialect: None,
+            table: Some("test".into()),
+            sql: None,
+            entities: vec![],
+            dimensions: vec![Dimension {
+                name: "region".into(),
+                dimension_type: DimensionType::String,
+                description: None,
+                expr: "region".into(),
+                original_expr: None,
+                samples: None,
+                synonyms: None,
+                primary_key: None,
+                sub_query: None,
+                inherits_from: None,
+                meta: None,
+            }],
+            measures: Some(vec![
+                Measure {
+                    name: "total".into(),
+                    measure_type: MeasureType::Sum,
+                    description: None,
+                    expr: Some("amount".into()),
+                    original_expr: None,
+                    filters: None,
+                    samples: None,
+                    synonyms: None,
+                    rolling_window: None,
+                    inherits_from: None,
+                    meta: None,
+                },
+                Measure {
+                    name: "med".into(),
+                    measure_type: MeasureType::Median,
+                    description: None,
+                    expr: Some("amount".into()),
+                    original_expr: None,
+                    filters: None,
+                    samples: None,
+                    synonyms: None,
+                    rolling_window: None,
+                    inherits_from: None,
+                    meta: None,
+                },
+                Measure {
+                    name: "computed".into(),
+                    measure_type: MeasureType::Number,
+                    description: None,
+                    expr: Some("amount / qty".into()),
+                    original_expr: None,
+                    filters: None,
+                    samples: None,
+                    synonyms: None,
+                    rolling_window: None,
+                    inherits_from: None,
+                    meta: None,
+                },
+            ]),
+            segments: vec![],
+            pre_aggregations: None,
+            meta: None,
+        };
+        let rollups = resolve_rollups(&view);
+        assert_eq!(rollups.len(), 1);
+        let measure_names: Vec<&str> = rollups[0]
+            .measures
+            .iter()
+            .map(|m| m.name.as_str())
+            .collect();
+        assert!(measure_names.contains(&"total"), "Sum should be included");
+        assert!(!measure_names.contains(&"med"), "Median should be excluded");
+        assert!(
+            !measure_names.contains(&"computed"),
+            "Number should be excluded"
+        );
     }
 }

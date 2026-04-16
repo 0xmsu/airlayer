@@ -1803,11 +1803,28 @@ fn write_parquet(
     let conn = duckdb::Connection::open_in_memory()
         .map_err(|e| format!("Failed to open DuckDB: {}", e))?;
 
-    // Build column definitions (all as VARCHAR for simplicity; Parquet will store as string columns)
+    // Infer DuckDB column types from JSON values in the first row
+    let first_row = data.rows.first();
     let columns: Vec<String> = data
         .columns
         .iter()
-        .map(|c| format!("\"{}\" VARCHAR", c.replace('"', "\"\"")))
+        .map(|c| {
+            let col_type = first_row
+                .and_then(|row| row.get(c))
+                .map(|v| match v {
+                    serde_json::Value::Number(n) => {
+                        if n.is_f64() {
+                            "DOUBLE"
+                        } else {
+                            "BIGINT"
+                        }
+                    }
+                    serde_json::Value::Bool(_) => "BOOLEAN",
+                    _ => "VARCHAR",
+                })
+                .unwrap_or("VARCHAR");
+            format!("\"{}\" {}", c.replace('"', "\"\""), col_type)
+        })
         .collect();
     let create_sql = format!("CREATE TABLE __export ({})", columns.join(", "));
     conn.execute_batch(&create_sql)
@@ -2082,127 +2099,140 @@ fn run_execute(
                                     .and_then(|pa| pa.schema.clone())
                                     .unwrap_or_else(|| "AIRLAYER".to_string());
 
-                                // Detect ClickHouse using the selected datasource (not just the first)
-                                let is_clickhouse = if let Some(ds) = datasource {
+                                // Resolve dialect for the selected datasource
+                                let preagg_dialect = if let Some(ds) = datasource {
                                     partial
                                         .databases
                                         .iter()
                                         .find(|d| d.name == ds)
-                                        .map(|d| d.db_type.as_str())
-                                        == Some("clickhouse")
+                                        .and_then(|d| Dialect::from_str(&d.db_type))
                                 } else {
-                                    partial.databases.first().map(|d| d.db_type.as_str())
-                                        == Some("clickhouse")
+                                    partial
+                                        .databases
+                                        .first()
+                                        .and_then(|d| Dialect::from_str(&d.db_type))
                                 };
 
-                                let manifest_sql = format!(
-                                    "SELECT view_name, rollup_name, rollup_hash, table_name, \
+                                if let Some(ref dialect) = preagg_dialect {
+                                    let manifest_table =
+                                        dialect.qualify_table(&preagg_schema, "__manifest");
+                                    let final_clause = if *dialect == Dialect::ClickHouse {
+                                        " FINAL"
+                                    } else {
+                                        ""
+                                    };
+                                    let manifest_sql = format!(
+                                        "SELECT view_name, rollup_name, rollup_hash, table_name, \
                                      dimensions, measures, time_dimension, granularity, build_date \
-                                     FROM {}.{}{}",
-                                    preagg_schema,
-                                    "__manifest",
-                                    if is_clickhouse { " FINAL" } else { "" }
-                                );
-                                if let Ok(manifest_result) =
-                                    crate::executor::execute(connection, &manifest_sql, &[])
-                                {
-                                    let rollup_entries: Vec<
-                                        crate::engine::preagg::LocalRollupEntry,
-                                    > = manifest_result
-                                        .rows
-                                        .iter()
-                                        .filter_map(|row| {
-                                            Some(crate::engine::preagg::LocalRollupEntry {
-                                                view_name: row
-                                                    .get("view_name")?
-                                                    .as_str()?
-                                                    .to_string(),
-                                                rollup_name: row
-                                                    .get("rollup_name")?
-                                                    .as_str()?
-                                                    .to_string(),
-                                                rollup_hash: row
-                                                    .get("rollup_hash")?
-                                                    .as_str()?
-                                                    .to_string(),
-                                                file: String::new(),
-                                                dimensions: serde_json::from_str(
-                                                    row.get("dimensions")?.as_str()?,
-                                                )
-                                                .unwrap_or_default(),
-                                                measures: serde_json::from_str(
-                                                    row.get("measures")?.as_str()?,
-                                                )
-                                                .unwrap_or_default(),
-                                                time_dimension: row
-                                                    .get("time_dimension")
-                                                    .and_then(|v| v.as_str())
-                                                    .filter(|s| !s.is_empty())
-                                                    .map(|s| s.to_string()),
-                                                granularity: row
-                                                    .get("granularity")
-                                                    .and_then(|v| v.as_str())
-                                                    .filter(|s| !s.is_empty())
-                                                    .map(|s| s.to_string()),
-                                                build_date: row
-                                                    .get("build_date")
-                                                    .and_then(|v| v.as_str())
-                                                    .unwrap_or("")
-                                                    .to_string(),
-                                            })
-                                        })
-                                        .collect();
-
-                                    if let Some(entry) = crate::engine::preagg::check_coverage(
-                                        &request,
-                                        &rollup_entries,
-                                    ) {
-                                        // Get the actual table name from the manifest
-                                        let actual_table = manifest_result
+                                     FROM {manifest_table}{final_clause}",
+                                    );
+                                    if let Ok(manifest_result) =
+                                        crate::executor::execute(connection, &manifest_sql, &[])
+                                    {
+                                        let rollup_entries: Vec<
+                                            crate::engine::preagg::LocalRollupEntry,
+                                        > = manifest_result
                                             .rows
                                             .iter()
-                                            .find(|row| {
-                                                row.get("rollup_hash").and_then(|v| v.as_str())
-                                                    == Some(&entry.rollup_hash)
-                                                    && row.get("view_name").and_then(|v| v.as_str())
-                                                        == Some(&entry.view_name)
+                                            .filter_map(|row| {
+                                                Some(crate::engine::preagg::LocalRollupEntry {
+                                                    view_name: row
+                                                        .get("view_name")?
+                                                        .as_str()?
+                                                        .to_string(),
+                                                    rollup_name: row
+                                                        .get("rollup_name")?
+                                                        .as_str()?
+                                                        .to_string(),
+                                                    rollup_hash: row
+                                                        .get("rollup_hash")?
+                                                        .as_str()?
+                                                        .to_string(),
+                                                    file: String::new(),
+                                                    dimensions: serde_json::from_str(
+                                                        row.get("dimensions")?.as_str()?,
+                                                    )
+                                                    .unwrap_or_default(),
+                                                    measures: serde_json::from_str(
+                                                        row.get("measures")?.as_str()?,
+                                                    )
+                                                    .unwrap_or_default(),
+                                                    time_dimension: row
+                                                        .get("time_dimension")
+                                                        .and_then(|v| v.as_str())
+                                                        .filter(|s| !s.is_empty())
+                                                        .map(|s| s.to_string()),
+                                                    granularity: row
+                                                        .get("granularity")
+                                                        .and_then(|v| v.as_str())
+                                                        .filter(|s| !s.is_empty())
+                                                        .map(|s| s.to_string()),
+                                                    build_date: row
+                                                        .get("build_date")
+                                                        .and_then(|v| v.as_str())
+                                                        .unwrap_or("")
+                                                        .to_string(),
+                                                })
                                             })
-                                            .and_then(|row| {
-                                                row.get("table_name").and_then(|v| v.as_str())
-                                            })
-                                            .unwrap_or("");
+                                            .collect();
 
-                                        if !actual_table.is_empty() {
-                                            // TODO: pass the actual resolved dialect once
-                                            // generate_warehouse_reagg_sql is dialect-aware.
-                                            // Currently the function ignores the dialect argument
-                                            // and always generates DuckDB-flavored SQL with table
-                                            // substitution, so ClickHouse is a safe placeholder.
-                                            let reagg_sql =
+                                        if let Some(entry) = crate::engine::preagg::check_coverage(
+                                            &request,
+                                            &rollup_entries,
+                                        ) {
+                                            // Get the actual table name from the manifest
+                                            let actual_table = manifest_result
+                                                .rows
+                                                .iter()
+                                                .find(|row| {
+                                                    row.get("rollup_hash").and_then(|v| v.as_str())
+                                                        == Some(&entry.rollup_hash)
+                                                        && row
+                                                            .get("view_name")
+                                                            .and_then(|v| v.as_str())
+                                                            == Some(&entry.view_name)
+                                                })
+                                                .and_then(|row| {
+                                                    row.get("table_name").and_then(|v| v.as_str())
+                                                })
+                                                .unwrap_or("");
+
+                                            if !actual_table.is_empty() {
+                                                // Re-quote the stored table name using the dialect
+                                                let fq_table = if let Some((s, t)) =
+                                                    actual_table.split_once('.')
+                                                {
+                                                    dialect.qualify_table(s, t)
+                                                } else {
+                                                    dialect
+                                                        .qualify_table(&preagg_schema, actual_table)
+                                                };
+                                                let reagg_sql =
                                                 crate::engine::preagg::generate_warehouse_reagg_sql(
                                                     &request,
                                                     entry,
-                                                    actual_table,
-                                                    &crate::dialect::Dialect::ClickHouse,
+                                                    &fq_table,
+                                                    dialect,
                                                 );
 
-                                            if let Ok(exec_result) = crate::executor::execute(
-                                                connection,
-                                                &reagg_sql,
-                                                &[],
-                                            ) {
-                                                return Ok(QueryEnvelope::success(
-                                                    result.sql,
-                                                    &result.columns,
-                                                    exec_result,
-                                                    views_used,
-                                                ));
+                                                if let Ok(exec_result) = crate::executor::execute(
+                                                    connection,
+                                                    &reagg_sql,
+                                                    &[],
+                                                ) {
+                                                    return Ok(QueryEnvelope::success(
+                                                        result.sql,
+                                                        &result.columns,
+                                                        exec_result,
+                                                        views_used,
+                                                    ));
+                                                }
                                             }
+                                            // If warehouse pre-agg fails, fall through to raw SQL
                                         }
-                                        // If warehouse pre-agg fails, fall through to raw SQL
                                     }
-                                }
-                                // If manifest read fails (table doesn't exist), fall through silently
+                                    // If manifest read fails (table doesn't exist), fall through silently
+                                } // if let Some(ref dialect) = preagg_dialect
                             }
                         }
                     }

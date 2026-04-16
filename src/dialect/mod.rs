@@ -186,6 +186,19 @@ impl Dialect {
         )
     }
 
+    /// CAST expression to a double/float type for this dialect.
+    pub fn cast_to_double(&self, expr: &str) -> String {
+        match self {
+            Dialect::Postgres | Dialect::Redshift => {
+                format!("CAST({} AS DOUBLE PRECISION)", expr)
+            }
+            Dialect::ClickHouse => format!("CAST({} AS Float64)", expr),
+            Dialect::BigQuery => format!("CAST({} AS FLOAT64)", expr),
+            Dialect::MySQL | Dialect::Domo => format!("CAST({} AS DECIMAL(38,10))", expr),
+            _ => format!("CAST({} AS DOUBLE)", expr), // Snowflake, DuckDB, Databricks, Presto, SQLite
+        }
+    }
+
     /// Build a fully-qualified table name with proper quoting for each part.
     /// E.g. `"preagg"."events__abc123__20260415"` for Postgres,
     ///      `\`preagg\`.\`events__abc123__20260415\`` for BigQuery.

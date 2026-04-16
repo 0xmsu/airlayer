@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # Seed a DuckDB warehouse with 500M events for the pre-aggregation demo.
+# NOTE: The generated database requires ~8-10 GB of disk space.
 #
 # Usage: ./seed.sh  (do NOT dot-source with ". ./seed.sh")
 (
