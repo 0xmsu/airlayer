@@ -3139,8 +3139,7 @@ mod preagg_tests {
         let view = engine.view("events").expect("events view");
         let rollups = airlayer::engine::preagg::resolve_rollups(view);
         let rollup = &rollups[0];
-        let table_name = format!("{}.events__{}__{}",
-            PREAGG_SCHEMA, rollup.hash, DATE_STR);
+        let table_name = format!("{}.events__{}__{}", PREAGG_SCHEMA, rollup.hash, DATE_STR);
 
         PREAGG_BUILD.call_once(|| {
             // Create schema
@@ -3148,12 +3147,19 @@ mod preagg_tests {
                 .expect("create preagg db");
 
             // Drop pre-existing manifest table
-            ch_exec(&format!("DROP TABLE IF EXISTS {}.__manifest", PREAGG_SCHEMA))
-                .expect("drop manifest");
+            ch_exec(&format!(
+                "DROP TABLE IF EXISTS {}.__manifest",
+                PREAGG_SCHEMA
+            ))
+            .expect("drop manifest");
 
             // Build rollup table (DROP + CTAS)
             let sqls = airlayer::engine::preagg::generate_build_sql(
-                view, rollup, PREAGG_SCHEMA, DATE_STR, &Dialect::ClickHouse,
+                view,
+                rollup,
+                PREAGG_SCHEMA,
+                DATE_STR,
+                &Dialect::ClickHouse,
             );
             for sql in &sqls {
                 ch_exec(sql).expect("build SQL failed");
@@ -3161,18 +3167,26 @@ mod preagg_tests {
 
             // Create manifest table
             let manifest_ddl = airlayer::engine::preagg::generate_manifest_create_sql(
-                PREAGG_SCHEMA, &Dialect::ClickHouse,
+                PREAGG_SCHEMA,
+                &Dialect::ClickHouse,
             );
             ch_exec(&manifest_ddl).expect("manifest DDL failed");
 
             // Insert manifest entry
             let entry = airlayer::engine::preagg::build_manifest_entry(
-                view, rollup, PREAGG_SCHEMA, DATE_STR,
+                view,
+                rollup,
+                PREAGG_SCHEMA,
+                DATE_STR,
             );
-            let upsert = airlayer::engine::preagg::generate_manifest_upsert_sql(
-                PREAGG_SCHEMA, &entry, &Dialect::ClickHouse,
+            let upsert_stmts = airlayer::engine::preagg::generate_manifest_upsert_sql(
+                PREAGG_SCHEMA,
+                &entry,
+                &Dialect::ClickHouse,
             );
-            ch_exec(&upsert).expect("manifest upsert failed");
+            for stmt in &upsert_stmts {
+                ch_exec(stmt).expect("manifest upsert failed");
+            }
         });
 
         table_name
@@ -3263,8 +3277,7 @@ mod preagg_tests {
         }
         let table_name = build();
 
-        let count = ch_exec(&format!("SELECT COUNT(*) FROM {}", table_name))
-            .expect("count");
+        let count = ch_exec(&format!("SELECT COUNT(*) FROM {}", table_name)).expect("count");
         let n: i64 = count.trim().parse().unwrap_or(0);
         // 6 unique (platform, day, user_id) groups in seed data
         assert_eq!(n, 6, "Expected 6 rows in rollup, got {}", n);
@@ -3283,41 +3296,55 @@ mod preagg_tests {
 
         // Total event count across all rows should equal 12 (original row count)
         let total_count = ch_exec(&format!(
-            "SELECT SUM(`total_events__count`) FROM {}", table_name
-        )).expect("total count");
+            "SELECT SUM(`total_events__count`) FROM {}",
+            table_name
+        ))
+        .expect("total count");
         assert_eq!(
-            total_count.trim(), "12",
-            "SUM of total_events__count should be 12, got: {}", total_count.trim()
+            total_count.trim(),
+            "12",
+            "SUM of total_events__count should be 12, got: {}",
+            total_count.trim()
         );
 
         // Total revenue: SUM of all revenue_cents / 100.0
         // 4999 + 2500 + 0 + 0 + 0 + 9999 + 0 + 1500 + 0 + 0 + 0 + 0 = 18998 → 189.98
         let total_rev = ch_exec(&format!(
-            "SELECT SUM(`total_revenue__sum`) FROM {}", table_name
-        )).expect("total rev");
+            "SELECT SUM(`total_revenue__sum`) FROM {}",
+            table_name
+        ))
+        .expect("total rev");
         let rev: f64 = total_rev.trim().parse().unwrap_or(0.0);
         assert!(
             (rev - 189.98).abs() < 0.01,
-            "Total revenue should be ~189.98, got: {}", rev
+            "Total revenue should be ~189.98, got: {}",
+            rev
         );
 
         // Verify per-platform re-aggregation: web should have 3 rollup rows
         let web_rows = ch_exec(&format!(
-            "SELECT COUNT(*) FROM {} WHERE `platform` = 'web'", table_name
-        )).expect("web rows");
+            "SELECT COUNT(*) FROM {} WHERE `platform` = 'web'",
+            table_name
+        ))
+        .expect("web rows");
         assert_eq!(
-            web_rows.trim(), "3",
-            "Web platform should have 3 rollup rows (3 user-day combos), got: {}", web_rows.trim()
+            web_rows.trim(),
+            "3",
+            "Web platform should have 3 rollup rows (3 user-day combos), got: {}",
+            web_rows.trim()
         );
 
         // Web total events: u1(3) + u4(2) + u5(2) = 7
         let web_events = ch_exec(&format!(
             "SELECT SUM(`total_events__count`) FROM {} WHERE `platform` = 'web'",
             table_name
-        )).expect("web events");
+        ))
+        .expect("web events");
         assert_eq!(
-            web_events.trim(), "7",
-            "Web total events should be 7, got: {}", web_events.trim()
+            web_events.trim(),
+            "7",
+            "Web total events should be 7, got: {}",
+            web_events.trim()
         );
     }
 
@@ -3345,7 +3372,10 @@ mod preagg_tests {
         let cols: Vec<&str> = line.split('\t').collect();
         assert_eq!(cols[0], "events", "view_name");
         assert_eq!(cols[1], "by_platform_daily", "rollup_name");
-        assert!(cols[3].contains("events__"), "table_name should contain view prefix");
+        assert!(
+            cols[3].contains("events__"),
+            "table_name should contain view prefix"
+        );
         assert!(cols[3].contains(DATE_STR), "table_name should contain date");
         assert_eq!(cols[4], "created_at", "time_dimension");
         assert_eq!(cols[5], "day", "granularity");
@@ -3358,7 +3388,8 @@ mod preagg_tests {
         let dims_result = ch_exec(&dims_sql).expect("dims query");
         assert!(
             dims_result.contains("platform"),
-            "Dimensions should contain 'platform', got: {}", dims_result.trim()
+            "Dimensions should contain 'platform', got: {}",
+            dims_result.trim()
         );
     }
 
@@ -3395,9 +3426,11 @@ mod preagg_tests {
         let raw_lines: Vec<&str> = raw_result.trim().lines().collect();
 
         assert_eq!(
-            reagg_lines.len(), raw_lines.len(),
+            reagg_lines.len(),
+            raw_lines.len(),
             "Row count mismatch: reagg={}, raw={}",
-            reagg_lines.len(), raw_lines.len()
+            reagg_lines.len(),
+            raw_lines.len()
         );
 
         // Compare each row
@@ -3407,7 +3440,8 @@ mod preagg_tests {
 
             assert_eq!(
                 reagg_cols[0], raw_cols[0],
-                "Platform mismatch: reagg={}, raw={}", reagg_cols[0], raw_cols[0]
+                "Platform mismatch: reagg={}, raw={}",
+                reagg_cols[0], raw_cols[0]
             );
             assert_eq!(
                 reagg_cols[1], raw_cols[1],
@@ -3420,7 +3454,9 @@ mod preagg_tests {
             assert!(
                 (reagg_rev - raw_rev).abs() < 0.01,
                 "Revenue mismatch for {}: reagg={}, raw={}",
-                reagg_cols[0], reagg_rev, raw_rev
+                reagg_cols[0],
+                reagg_rev,
+                raw_rev
             );
         }
     }
@@ -3457,10 +3493,7 @@ mod preagg_tests {
         for (reagg_line, raw_line) in reagg_lines.iter().zip(raw_lines.iter()) {
             let reagg_cols: Vec<&str> = reagg_line.split('\t').collect();
             let raw_cols: Vec<&str> = raw_line.split('\t').collect();
-            assert_eq!(
-                reagg_cols[0], raw_cols[0],
-                "Platform mismatch"
-            );
+            assert_eq!(reagg_cols[0], raw_cols[0], "Platform mismatch");
             assert_eq!(
                 reagg_cols[1], raw_cols[1],
                 "Count distinct mismatch for {}: reagg={}, raw={}",
@@ -3501,19 +3534,20 @@ mod preagg_tests {
         let raw_lines: Vec<&str> = raw_result.trim().lines().collect();
 
         assert_eq!(
-            reagg_lines.len(), raw_lines.len(),
+            reagg_lines.len(),
+            raw_lines.len(),
             "Row count mismatch: reagg has {} rows, raw has {} rows\nReagg:\n{}\nRaw:\n{}",
-            reagg_lines.len(), raw_lines.len(), reagg_result.trim(), raw_result.trim()
+            reagg_lines.len(),
+            raw_lines.len(),
+            reagg_result.trim(),
+            raw_result.trim()
         );
 
         // Verify event counts match row by row
         for (reagg_line, raw_line) in reagg_lines.iter().zip(raw_lines.iter()) {
             let reagg_cols: Vec<&str> = reagg_line.split('\t').collect();
             let raw_cols: Vec<&str> = raw_line.split('\t').collect();
-            assert_eq!(
-                reagg_cols[0], raw_cols[0],
-                "Platform mismatch"
-            );
+            assert_eq!(reagg_cols[0], raw_cols[0], "Platform mismatch");
             assert_eq!(
                 reagg_cols[2], raw_cols[2],
                 "Event count mismatch for {} on {}: reagg={}, raw={}",
@@ -3542,11 +3576,17 @@ mod preagg_tests {
         let view = engine.view("events").expect("events view");
         let rollups = airlayer::engine::preagg::resolve_rollups(view);
 
-        let rebuild_table = format!("{}.events__{}__{}",
-            PREAGG_SCHEMA, rollups[0].hash, rebuild_date);
+        let rebuild_table = format!(
+            "{}.events__{}__{}",
+            PREAGG_SCHEMA, rollups[0].hash, rebuild_date
+        );
 
         let sqls = airlayer::engine::preagg::generate_build_sql(
-            view, &rollups[0], PREAGG_SCHEMA, rebuild_date, &Dialect::ClickHouse,
+            view,
+            &rollups[0],
+            PREAGG_SCHEMA,
+            rebuild_date,
+            &Dialect::ClickHouse,
         );
 
         // Build twice to prove idempotency (generate_build_sql includes DROP IF EXISTS)

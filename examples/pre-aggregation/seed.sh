@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Seed a DuckDB warehouse with 1M events for the pre-aggregation demo.
+# Seed a DuckDB warehouse with 500M events for the pre-aggregation demo.
 #
 # Usage: ./seed.sh  (do NOT dot-source with ". ./seed.sh")
 (
@@ -8,14 +8,14 @@ cd "$(dirname "$0")"
 
 mkdir -p data
 
-echo "Seeding 1,000,000 events into data/warehouse.duckdb ..."
+echo "Seeding 500,000,000 events into data/warehouse.duckdb ..."
 
 duckdb data/warehouse.duckdb <<'SQL'
 DROP TABLE IF EXISTS events;
 
 CREATE TABLE events AS
 SELECT
-    'e' || LPAD(CAST(i AS VARCHAR), 7, '0') AS event_id,
+    'e' || LPAD(CAST(i AS VARCHAR), 9, '0') AS event_id,
     CASE i % 5
         WHEN 0 THEN 'page_view'
         WHEN 1 THEN 'click'
@@ -23,7 +23,7 @@ SELECT
         WHEN 3 THEN 'signup'
         WHEN 4 THEN 'share'
     END AS event_type,
-    'u' || LPAD(CAST((i % 5000) AS VARCHAR), 5, '0') AS user_id,
+    'u' || LPAD(CAST((i % 500000) AS VARCHAR), 6, '0') AS user_id,
     CAST('2024-01-01' AS TIMESTAMP) + INTERVAL (i % 365) DAY
         + INTERVAL (i % 24) HOUR AS created_at,
     CASE i % 6
@@ -40,7 +40,7 @@ SELECT
         WHEN 2 THEN 'android'
     END AS platform,
     CASE WHEN i % 5 = 2 THEN (i % 500) * 100 ELSE 0 END AS revenue_cents
-FROM generate_series(1, 1000000) t(i);
+FROM generate_series(1, 500000000) t(i);
 
 SELECT COUNT(*) || ' rows seeded' FROM events;
 SQL

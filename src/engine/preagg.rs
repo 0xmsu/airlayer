@@ -217,9 +217,7 @@ pub fn generate_build_sql(
     date_str: &str,
     dialect: &Dialect,
 ) -> Vec<String> {
-    let table_name = format!("{}__{}__{}",
-        view.name, rollup.hash, date_str
-    );
+    let table_name = format!("{}__{}__{}", view.name, rollup.hash, date_str);
     let fq_table = format!("{}.{}", schema, table_name);
 
     // Determine which raw expr columns need to be in GROUP BY (for count_distinct, median)
@@ -386,14 +384,16 @@ pub fn generate_manifest_create_sql(schema: &str, dialect: &Dialect) -> String {
     }
 }
 
-/// Generate INSERT SQL for a manifest entry.
+/// Generate upsert SQL for a manifest entry.
+/// ClickHouse uses INSERT (ReplacingMergeTree handles dedup).
+/// Other dialects use DELETE + INSERT to handle re-builds.
 pub fn generate_manifest_upsert_sql(
     schema: &str,
     entry: &ManifestEntry,
-    _dialect: &Dialect,
-) -> String {
+    dialect: &Dialect,
+) -> Vec<String> {
     let fq_table = format!("{}.__manifest", schema);
-    format!(
+    let insert = format!(
         "INSERT INTO {fq_table} (view_name, rollup_name, rollup_hash, table_name, dimensions, measures, time_dimension, granularity, build_date) VALUES (\
          '{}', '{}', '{}', '{}', '{}', '{}', '{}', '{}', '{}')",
         entry.view_name.replace('\'', "''"),
@@ -405,7 +405,18 @@ pub fn generate_manifest_upsert_sql(
         entry.time_dimension.as_deref().unwrap_or("").replace('\'', "''"),
         entry.granularity.as_deref().unwrap_or("").replace('\'', "''"),
         entry.build_date.replace('\'', "''"),
-    )
+    );
+    match dialect {
+        Dialect::ClickHouse => vec![insert],
+        _ => {
+            let delete = format!(
+                "DELETE FROM {fq_table} WHERE view_name = '{}' AND rollup_name = '{}'",
+                entry.view_name.replace('\'', "''"),
+                entry.rollup_name.replace('\'', "''"),
+            );
+            vec![delete, insert]
+        }
+    }
 }
 
 /// Check if any rollup in the manifest covers the given query.
@@ -558,10 +569,7 @@ pub fn generate_reagg_sql(
             .iter()
             .find(|m| m.get("name").and_then(|n| n.as_str()) == Some(measure_name))
         {
-            let m_type = m_meta
-                .get("type")
-                .and_then(|t| t.as_str())
-                .unwrap_or("");
+            let m_type = m_meta.get("type").and_then(|t| t.as_str()).unwrap_or("");
             let columns: Vec<String> = m_meta
                 .get("columns")
                 .and_then(|c| c.as_array())
@@ -620,10 +628,7 @@ pub fn generate_reagg_sql(
                         .first()
                         .cloned()
                         .unwrap_or_else(|| measure_name.to_string());
-                    select_cols.push(format!(
-                        "COUNT(DISTINCT \"{}\") AS \"{}\"",
-                        col, alias
-                    ));
+                    select_cols.push(format!("COUNT(DISTINCT \"{}\") AS \"{}\"", col, alias));
                 }
                 "median" => {
                     let col = columns
@@ -690,19 +695,22 @@ pub fn build_manifest_entry(
     schema: &str,
     date_str: &str,
 ) -> ManifestEntry {
-    let table_name = format!("{}__{}__{}",
-        view.name, rollup.hash, date_str
-    );
+    let table_name = format!("{}__{}__{}", view.name, rollup.hash, date_str);
 
     let measures_json = serde_json::to_string(
-        &rollup.measures.iter().map(|m| {
-            serde_json::json!({
-                "name": m.name,
-                "type": m.measure_type.to_string(),
-                "columns": m.columns,
+        &rollup
+            .measures
+            .iter()
+            .map(|m| {
+                serde_json::json!({
+                    "name": m.name,
+                    "type": m.measure_type.to_string(),
+                    "columns": m.columns,
+                })
             })
-        }).collect::<Vec<_>>()
-    ).unwrap_or_default();
+            .collect::<Vec<_>>(),
+    )
+    .unwrap_or_default();
 
     ManifestEntry {
         view_name: view.name.clone(),
@@ -740,20 +748,40 @@ mod tests {
         );
         assert_eq!(sqls.len(), 2); // DROP + CTAS
         let ctas = &sqls[1];
-        assert!(ctas.contains("CREATE TABLE"), "Missing CREATE TABLE: {}", ctas);
+        assert!(
+            ctas.contains("CREATE TABLE"),
+            "Missing CREATE TABLE: {}",
+            ctas
+        );
         assert!(ctas.contains("AIRLAYER"), "Missing schema: {}", ctas);
         assert!(ctas.contains("orders__"), "Missing view name: {}", ctas);
         assert!(ctas.contains("20260415"), "Missing date: {}", ctas);
         assert!(ctas.contains("SUM("), "Missing SUM aggregation: {}", ctas);
-        assert!(ctas.contains("total_revenue__sum"), "Missing column alias: {}", ctas);
-        assert!(ctas.contains("toStartOfMonth"), "Missing ClickHouse date_trunc: {}", ctas);
+        assert!(
+            ctas.contains("total_revenue__sum"),
+            "Missing column alias: {}",
+            ctas
+        );
+        assert!(
+            ctas.contains("toStartOfMonth"),
+            "Missing ClickHouse date_trunc: {}",
+            ctas
+        );
     }
 
     #[test]
     fn test_generate_manifest_sql() {
         let create = generate_manifest_create_sql("AIRLAYER", &crate::dialect::Dialect::ClickHouse);
-        assert!(create.contains("__manifest"), "Missing manifest table name: {}", create);
-        assert!(create.contains("CREATE TABLE"), "Missing CREATE TABLE: {}", create);
+        assert!(
+            create.contains("__manifest"),
+            "Missing manifest table name: {}",
+            create
+        );
+        assert!(
+            create.contains("CREATE TABLE"),
+            "Missing CREATE TABLE: {}",
+            create
+        );
     }
 
     #[test]
@@ -769,30 +797,89 @@ mod tests {
             granularity: Some("month".into()),
             build_date: "2026-04-15".into(),
         };
-        let sql = generate_manifest_upsert_sql("AIRLAYER", &entry, &crate::dialect::Dialect::ClickHouse);
-        assert!(sql.contains("INSERT INTO"), "Missing INSERT: {}", sql);
-        assert!(sql.contains("orders"), "Missing view name: {}", sql);
+        let stmts =
+            generate_manifest_upsert_sql("AIRLAYER", &entry, &crate::dialect::Dialect::ClickHouse);
+        assert_eq!(stmts.len(), 1, "ClickHouse should produce only INSERT");
+        assert!(
+            stmts[0].contains("INSERT INTO"),
+            "Missing INSERT: {}",
+            stmts[0]
+        );
+        assert!(
+            stmts[0].contains("orders"),
+            "Missing view name: {}",
+            stmts[0]
+        );
+
+        // Non-ClickHouse should produce DELETE + INSERT
+        let stmts_duckdb =
+            generate_manifest_upsert_sql("AIRLAYER", &entry, &crate::dialect::Dialect::DuckDB);
+        assert_eq!(
+            stmts_duckdb.len(),
+            2,
+            "DuckDB should produce DELETE + INSERT"
+        );
+        assert!(
+            stmts_duckdb[0].contains("DELETE FROM"),
+            "Missing DELETE: {}",
+            stmts_duckdb[0]
+        );
+        assert!(
+            stmts_duckdb[1].contains("INSERT INTO"),
+            "Missing INSERT: {}",
+            stmts_duckdb[1]
+        );
     }
 
     #[test]
     fn test_rollup_hash_deterministic() {
-        let h1 = compute_rollup_hash(&["region".into(), "status".into()], &["revenue".into()], Some("created_at"), Some("month"));
-        let h2 = compute_rollup_hash(&["region".into(), "status".into()], &["revenue".into()], Some("created_at"), Some("month"));
+        let h1 = compute_rollup_hash(
+            &["region".into(), "status".into()],
+            &["revenue".into()],
+            Some("created_at"),
+            Some("month"),
+        );
+        let h2 = compute_rollup_hash(
+            &["region".into(), "status".into()],
+            &["revenue".into()],
+            Some("created_at"),
+            Some("month"),
+        );
         assert_eq!(h1, h2);
         assert_eq!(h1.len(), 8);
     }
 
     #[test]
     fn test_rollup_hash_order_independent() {
-        let h1 = compute_rollup_hash(&["region".into(), "status".into()], &["a".into(), "b".into()], None, None);
-        let h2 = compute_rollup_hash(&["status".into(), "region".into()], &["b".into(), "a".into()], None, None);
+        let h1 = compute_rollup_hash(
+            &["region".into(), "status".into()],
+            &["a".into(), "b".into()],
+            None,
+            None,
+        );
+        let h2 = compute_rollup_hash(
+            &["status".into(), "region".into()],
+            &["b".into(), "a".into()],
+            None,
+            None,
+        );
         assert_eq!(h1, h2);
     }
 
     #[test]
     fn test_rollup_hash_different_inputs() {
-        let h1 = compute_rollup_hash(&["region".into()], &["revenue".into()], Some("created_at"), Some("month"));
-        let h2 = compute_rollup_hash(&["status".into()], &["revenue".into()], Some("created_at"), Some("month"));
+        let h1 = compute_rollup_hash(
+            &["region".into()],
+            &["revenue".into()],
+            Some("created_at"),
+            Some("month"),
+        );
+        let h2 = compute_rollup_hash(
+            &["status".into()],
+            &["revenue".into()],
+            Some("created_at"),
+            Some("month"),
+        );
         assert_ne!(h1, h2);
     }
 
@@ -815,14 +902,17 @@ mod tests {
         // Should include all dimensions (except datetime — that's the time dim)
         assert!(rollups[0].dimensions.contains(&"region".to_string()));
         // Should include all measures (except custom)
-        assert!(rollups[0].measures.iter().any(|m| m.name == "total_revenue"));
+        assert!(rollups[0]
+            .measures
+            .iter()
+            .any(|m| m.name == "total_revenue"));
     }
 
     fn test_view_with_preaggs() -> View {
         use crate::schema::models::*;
         View {
             name: "orders".to_string(),
-            description: "test".to_string(),
+            description: Some("test".to_string()),
             label: None,
             datasource: None,
             dialect: None,
@@ -830,12 +920,46 @@ mod tests {
             sql: None,
             entities: vec![],
             dimensions: vec![
-                Dimension { name: "region".into(), dimension_type: DimensionType::String, description: None, expr: "region".into(), original_expr: None, samples: None, synonyms: None, primary_key: None, sub_query: None, inherits_from: None, meta: None },
-                Dimension { name: "created_at".into(), dimension_type: DimensionType::Datetime, description: None, expr: "created_at".into(), original_expr: None, samples: None, synonyms: None, primary_key: None, sub_query: None, inherits_from: None, meta: None },
+                Dimension {
+                    name: "region".into(),
+                    dimension_type: DimensionType::String,
+                    description: None,
+                    expr: "region".into(),
+                    original_expr: None,
+                    samples: None,
+                    synonyms: None,
+                    primary_key: None,
+                    sub_query: None,
+                    inherits_from: None,
+                    meta: None,
+                },
+                Dimension {
+                    name: "created_at".into(),
+                    dimension_type: DimensionType::Datetime,
+                    description: None,
+                    expr: "created_at".into(),
+                    original_expr: None,
+                    samples: None,
+                    synonyms: None,
+                    primary_key: None,
+                    sub_query: None,
+                    inherits_from: None,
+                    meta: None,
+                },
             ],
-            measures: Some(vec![
-                Measure { name: "total_revenue".into(), measure_type: MeasureType::Sum, description: None, expr: Some("revenue".into()), original_expr: None, filters: None, samples: None, synonyms: None, rolling_window: None, inherits_from: None, meta: None },
-            ]),
+            measures: Some(vec![Measure {
+                name: "total_revenue".into(),
+                measure_type: MeasureType::Sum,
+                description: None,
+                expr: Some("revenue".into()),
+                original_expr: None,
+                filters: None,
+                samples: None,
+                synonyms: None,
+                rolling_window: None,
+                inherits_from: None,
+                meta: None,
+            }]),
             segments: vec![],
             pre_aggregations: Some(vec![PreAggregation {
                 name: "by_region_monthly".into(),
@@ -852,7 +976,7 @@ mod tests {
         use crate::schema::models::*;
         View {
             name: "orders".into(),
-            description: "test".into(),
+            description: Some("test".into()),
             label: None,
             datasource: None,
             dialect: None,
@@ -860,12 +984,60 @@ mod tests {
             sql: None,
             entities: vec![],
             dimensions: vec![
-                Dimension { name: "region".into(), dimension_type: DimensionType::String, description: None, expr: "region".into(), original_expr: None, samples: None, synonyms: None, primary_key: None, sub_query: None, inherits_from: None, meta: None },
-                Dimension { name: "created_at".into(), dimension_type: DimensionType::Datetime, description: None, expr: "created_at".into(), original_expr: None, samples: None, synonyms: None, primary_key: None, sub_query: None, inherits_from: None, meta: None },
+                Dimension {
+                    name: "region".into(),
+                    dimension_type: DimensionType::String,
+                    description: None,
+                    expr: "region".into(),
+                    original_expr: None,
+                    samples: None,
+                    synonyms: None,
+                    primary_key: None,
+                    sub_query: None,
+                    inherits_from: None,
+                    meta: None,
+                },
+                Dimension {
+                    name: "created_at".into(),
+                    dimension_type: DimensionType::Datetime,
+                    description: None,
+                    expr: "created_at".into(),
+                    original_expr: None,
+                    samples: None,
+                    synonyms: None,
+                    primary_key: None,
+                    sub_query: None,
+                    inherits_from: None,
+                    meta: None,
+                },
             ],
             measures: Some(vec![
-                Measure { name: "total_revenue".into(), measure_type: MeasureType::Sum, description: None, expr: Some("revenue".into()), original_expr: None, filters: None, samples: None, synonyms: None, rolling_window: None, inherits_from: None, meta: None },
-                Measure { name: "avg_revenue".into(), measure_type: MeasureType::Average, description: None, expr: Some("revenue".into()), original_expr: None, filters: None, samples: None, synonyms: None, rolling_window: None, inherits_from: None, meta: None },
+                Measure {
+                    name: "total_revenue".into(),
+                    measure_type: MeasureType::Sum,
+                    description: None,
+                    expr: Some("revenue".into()),
+                    original_expr: None,
+                    filters: None,
+                    samples: None,
+                    synonyms: None,
+                    rolling_window: None,
+                    inherits_from: None,
+                    meta: None,
+                },
+                Measure {
+                    name: "avg_revenue".into(),
+                    measure_type: MeasureType::Average,
+                    description: None,
+                    expr: Some("revenue".into()),
+                    original_expr: None,
+                    filters: None,
+                    samples: None,
+                    synonyms: None,
+                    rolling_window: None,
+                    inherits_from: None,
+                    meta: None,
+                },
             ]),
             segments: vec![],
             pre_aggregations: None,
@@ -898,9 +1070,21 @@ mod tests {
             ..QueryRequest::new()
         };
         let sql = generate_reagg_sql(&request, &entry, "/data/orders.parquet");
-        assert!(sql.contains("read_parquet('/data/orders.parquet')"), "Missing FROM: {}", sql);
-        assert!(sql.contains("SUM(\"total_revenue__sum\")"), "Missing SUM re-agg: {}", sql);
-        assert!(sql.contains("\"region\""), "Missing dimension column: {}", sql);
+        assert!(
+            sql.contains("read_parquet('/data/orders.parquet')"),
+            "Missing FROM: {}",
+            sql
+        );
+        assert!(
+            sql.contains("SUM(\"total_revenue__sum\")"),
+            "Missing SUM re-agg: {}",
+            sql
+        );
+        assert!(
+            sql.contains("\"region\""),
+            "Missing dimension column: {}",
+            sql
+        );
         assert!(sql.contains("GROUP BY"), "Missing GROUP BY: {}", sql);
     }
 
@@ -919,8 +1103,16 @@ mod tests {
         };
         let sql = generate_reagg_sql(&request, &entry, "/data/orders.parquet");
         // Same granularity: should select the stored column directly, no date_trunc
-        assert!(sql.contains("\"created_at__month\""), "Missing stored time col: {}", sql);
-        assert!(!sql.contains("date_trunc"), "Should not re-truncate same gran: {}", sql);
+        assert!(
+            sql.contains("\"created_at__month\""),
+            "Missing stored time col: {}",
+            sql
+        );
+        assert!(
+            !sql.contains("date_trunc"),
+            "Should not re-truncate same gran: {}",
+            sql
+        );
     }
 
     #[test]
@@ -938,7 +1130,11 @@ mod tests {
         };
         let sql = generate_reagg_sql(&request, &entry, "/data/orders.parquet");
         // Coarser granularity: should apply date_trunc over the stored monthly column
-        assert!(sql.contains("date_trunc('year', \"created_at__month\")"), "Missing date_trunc: {}", sql);
+        assert!(
+            sql.contains("date_trunc('year', \"created_at__month\")"),
+            "Missing date_trunc: {}",
+            sql
+        );
     }
 
     #[test]
@@ -956,8 +1152,16 @@ mod tests {
         };
         let sql = generate_reagg_sql(&request, &entry, "/data/orders.parquet");
         // No requested gran: should fall back to the stored truncated column, not bare "created_at"
-        assert!(sql.contains("\"created_at__month\""), "Should use stored truncated col: {}", sql);
-        assert!(!sql.contains("\"created_at\""), "Should not select bare column: {}", sql);
+        assert!(
+            sql.contains("\"created_at__month\""),
+            "Should use stored truncated col: {}",
+            sql
+        );
+        assert!(
+            !sql.contains("\"created_at\""),
+            "Should not select bare column: {}",
+            sql
+        );
     }
 
     #[test]
@@ -968,7 +1172,11 @@ mod tests {
             ..QueryRequest::new()
         };
         let sql = generate_reagg_sql(&request, &entry, "/data/it's_here.parquet");
-        assert!(sql.contains("it''s_here"), "Single quote should be escaped: {}", sql);
+        assert!(
+            sql.contains("it''s_here"),
+            "Single quote should be escaped: {}",
+            sql
+        );
     }
 
     #[test]
@@ -999,8 +1207,16 @@ mod tests {
             "AIRLAYER.orders__a1b2c3d4__20260415",
             &crate::dialect::Dialect::ClickHouse,
         );
-        assert!(!sql.contains("read_parquet"), "Should not have read_parquet: {}", sql);
-        assert!(sql.contains("AIRLAYER.orders__a1b2c3d4__20260415"), "Missing table name: {}", sql);
+        assert!(
+            !sql.contains("read_parquet"),
+            "Should not have read_parquet: {}",
+            sql
+        );
+        assert!(
+            sql.contains("AIRLAYER.orders__a1b2c3d4__20260415"),
+            "Missing table name: {}",
+            sql
+        );
     }
 
     #[test]

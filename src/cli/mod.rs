@@ -1449,8 +1449,8 @@ fn run_build(
     // Check for schema override in config.yml
     let content = std::fs::read_to_string(config_path)
         .map_err(|e| format!("Failed to read config {}: {}", config_path.display(), e))?;
-    let partial: PartialConfig = serde_yaml::from_str(&content)
-        .map_err(|e| format!("Failed to parse config: {}", e))?;
+    let partial: PartialConfig =
+        serde_yaml::from_str(&content).map_err(|e| format!("Failed to parse config: {}", e))?;
 
     let effective_schema = if schema != "AIRLAYER" {
         schema.to_string() // CLI flag takes precedence
@@ -1460,9 +1460,12 @@ fn run_build(
         "AIRLAYER".to_string()
     };
 
-    let effective_database = database
-        .map(|s| s.to_string())
-        .or_else(|| partial.pre_aggregations.as_ref().and_then(|pa| pa.database.clone()));
+    let effective_database = database.map(|s| s.to_string()).or_else(|| {
+        partial
+            .pre_aggregations
+            .as_ref()
+            .and_then(|pa| pa.database.clone())
+    });
 
     let _dialects = build_dialect_map(ctx.config_path.as_ref(), None)?;
     let parser = make_parser(globals)?;
@@ -1470,7 +1473,10 @@ fn run_build(
 
     // Resolve dialect from config
     let dialect = if let Some(ref db_name) = effective_database {
-        let db_config = partial.databases.iter().find(|d| d.name == *db_name)
+        let db_config = partial
+            .databases
+            .iter()
+            .find(|d| d.name == *db_name)
             .ok_or_else(|| format!("Database '{}' not found in config", db_name))?;
         Dialect::from_str(&db_config.db_type)
             .ok_or_else(|| format!("Unknown dialect: {}", db_config.db_type))?
@@ -1484,7 +1490,9 @@ fn run_build(
     let date_str = chrono::Local::now().format("%Y%m%d").to_string();
 
     // Filter views if requested
-    let views: Vec<&crate::schema::models::View> = layer.views.iter()
+    let views: Vec<&crate::schema::models::View> = layer
+        .views
+        .iter()
         .filter(|v| view_filter.map_or(true, |f| v.name == f))
         .collect();
 
@@ -1501,7 +1509,10 @@ fn run_build(
     // 1. Create schema/database
     match dialect {
         Dialect::ClickHouse => {
-            all_stmts.push(format!("CREATE DATABASE IF NOT EXISTS {}", effective_schema));
+            all_stmts.push(format!(
+                "CREATE DATABASE IF NOT EXISTS {}",
+                effective_schema
+            ));
         }
         _ => {
             all_stmts.push(format!("CREATE SCHEMA IF NOT EXISTS {}", effective_schema));
@@ -1509,18 +1520,26 @@ fn run_build(
     }
 
     // 2. Create manifest table
-    all_stmts.push(preagg::generate_manifest_create_sql(&effective_schema, &dialect));
+    all_stmts.push(preagg::generate_manifest_create_sql(
+        &effective_schema,
+        &dialect,
+    ));
 
     // 3. For each view, resolve rollups and generate CTAS + manifest entries
     let mut manifest_entries: Vec<preagg::ManifestEntry> = Vec::new();
     for view in &views {
         let rollups = preagg::resolve_rollups(view);
         for rollup in &rollups {
-            let ctas_stmts = preagg::generate_build_sql(view, rollup, &effective_schema, &date_str, &dialect);
+            let ctas_stmts =
+                preagg::generate_build_sql(view, rollup, &effective_schema, &date_str, &dialect);
             all_stmts.extend(ctas_stmts);
 
             let entry = preagg::build_manifest_entry(view, rollup, &effective_schema, &date_str);
-            all_stmts.push(preagg::generate_manifest_upsert_sql(&effective_schema, &entry, &dialect));
+            all_stmts.extend(preagg::generate_manifest_upsert_sql(
+                &effective_schema,
+                &entry,
+                &dialect,
+            ));
             manifest_entries.push(entry);
         }
     }
@@ -1550,7 +1569,11 @@ fn run_build(
                 .map_err(|e| format!("Build statement {} failed: {}\nSQL: {}", i + 1, e, stmt))?;
         }
 
-        eprintln!("Build complete: {} rollup(s) in schema '{}'", manifest_entries.len(), effective_schema);
+        eprintln!(
+            "Build complete: {} rollup(s) in schema '{}'",
+            manifest_entries.len(),
+            effective_schema
+        );
         // Output summary as JSON
         let summary = serde_json::json!({
             "status": "success",
@@ -1561,7 +1584,10 @@ fn run_build(
                 "table": e.table_name,
             })).collect::<Vec<_>>(),
         });
-        println!("{}", serde_json::to_string_pretty(&summary).expect("serialize"));
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&summary).expect("serialize")
+        );
     }
 
     #[cfg(not(feature = "exec"))]
@@ -1589,8 +1615,8 @@ fn run_pull(
         .ok_or("pull requires a config.yml (auto-detected or via --config)")?;
     let content = std::fs::read_to_string(config_path)
         .map_err(|e| format!("Failed to read config {}: {}", config_path.display(), e))?;
-    let partial: PartialConfig = serde_yaml::from_str(&content)
-        .map_err(|e| format!("Failed to parse config: {}", e))?;
+    let partial: PartialConfig =
+        serde_yaml::from_str(&content).map_err(|e| format!("Failed to parse config: {}", e))?;
 
     let effective_schema = if schema != "AIRLAYER" {
         schema.to_string()
@@ -1600,9 +1626,12 @@ fn run_pull(
         "AIRLAYER".to_string()
     };
 
-    let effective_database = database
-        .map(|s| s.to_string())
-        .or_else(|| partial.pre_aggregations.as_ref().and_then(|pa| pa.database.clone()));
+    let effective_database = database.map(|s| s.to_string()).or_else(|| {
+        partial
+            .pre_aggregations
+            .as_ref()
+            .and_then(|pa| pa.database.clone())
+    });
 
     #[cfg(feature = "exec")]
     {
@@ -1619,15 +1648,22 @@ fn run_pull(
             "SELECT view_name, rollup_name, rollup_hash, table_name, dimensions, measures, \
              time_dimension, granularity, build_date \
              FROM {}.{}{}",
-            effective_schema, "__manifest",
+            effective_schema,
+            "__manifest",
             // ClickHouse needs FINAL to deduplicate ReplacingMergeTree rows
-            if partial.databases.first().map(|d| d.db_type.as_str()) == Some("clickhouse") { " FINAL" } else { "" }
+            if partial.databases.first().map(|d| d.db_type.as_str()) == Some("clickhouse") {
+                " FINAL"
+            } else {
+                ""
+            }
         );
         let manifest_result = crate::executor::execute(&connection, &manifest_sql, &[])
             .map_err(|e| format!("Failed to read manifest: {}", e))?;
 
         if manifest_result.rows.is_empty() {
-            return Err(format!("No rollups found in {}.{}", effective_schema, "__manifest").into());
+            return Err(
+                format!("No rollups found in {}.{}", effective_schema, "__manifest").into(),
+            );
         }
 
         // 2. Create cache directory
@@ -1639,13 +1675,28 @@ fn run_pull(
 
         for row in &manifest_result.rows {
             let view_name = row.get("view_name").and_then(|v| v.as_str()).unwrap_or("");
-            let rollup_name = row.get("rollup_name").and_then(|v| v.as_str()).unwrap_or("");
-            let rollup_hash = row.get("rollup_hash").and_then(|v| v.as_str()).unwrap_or("");
+            let rollup_name = row
+                .get("rollup_name")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let rollup_hash = row
+                .get("rollup_hash")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
             let table_name = row.get("table_name").and_then(|v| v.as_str()).unwrap_or("");
-            let dimensions_str = row.get("dimensions").and_then(|v| v.as_str()).unwrap_or("[]");
+            let dimensions_str = row
+                .get("dimensions")
+                .and_then(|v| v.as_str())
+                .unwrap_or("[]");
             let measures_str = row.get("measures").and_then(|v| v.as_str()).unwrap_or("[]");
-            let time_dim = row.get("time_dimension").and_then(|v| v.as_str()).unwrap_or("");
-            let granularity = row.get("granularity").and_then(|v| v.as_str()).unwrap_or("");
+            let time_dim = row
+                .get("time_dimension")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let granularity = row
+                .get("granularity")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
             let build_date = row.get("build_date").and_then(|v| v.as_str()).unwrap_or("");
 
             // Apply view filter
@@ -1658,7 +1709,10 @@ fn run_pull(
             let parquet_filename = format!("{}__{}.parquet", view_name, rollup_hash);
             let parquet_path = cache_dir.join(&parquet_filename);
 
-            eprintln!("Pulling {}.{} → {}", view_name, rollup_name, parquet_filename);
+            eprintln!(
+                "Pulling {}.{} → {}",
+                view_name, rollup_name, parquet_filename
+            );
 
             // SELECT all data from the pre-agg table
             let select_sql = format!("SELECT * FROM {}", table_name);
@@ -1669,7 +1723,8 @@ fn run_pull(
             write_parquet(&data, &parquet_path)?;
 
             let dimensions: Vec<String> = serde_json::from_str(dimensions_str).unwrap_or_default();
-            let measures: Vec<serde_json::Value> = serde_json::from_str(measures_str).unwrap_or_default();
+            let measures: Vec<serde_json::Value> =
+                serde_json::from_str(measures_str).unwrap_or_default();
 
             local_entries.push(preagg::LocalRollupEntry {
                 view_name: view_name.to_string(),
@@ -1678,8 +1733,16 @@ fn run_pull(
                 file: parquet_filename,
                 dimensions,
                 measures,
-                time_dimension: if time_dim.is_empty() { None } else { Some(time_dim.to_string()) },
-                granularity: if granularity.is_empty() { None } else { Some(granularity.to_string()) },
+                time_dimension: if time_dim.is_empty() {
+                    None
+                } else {
+                    Some(time_dim.to_string())
+                },
+                granularity: if granularity.is_empty() {
+                    None
+                } else {
+                    Some(granularity.to_string())
+                },
                 build_date: build_date.to_string(),
             });
         }
@@ -1698,7 +1761,11 @@ fn run_pull(
         let manifest_json = serde_json::to_string_pretty(&local_manifest)?;
         std::fs::write(&manifest_path, &manifest_json)?;
 
-        eprintln!("Pull complete: {} rollup(s) → {}", local_manifest.rollups.len(), cache_dir.display());
+        eprintln!(
+            "Pull complete: {} rollup(s) → {}",
+            local_manifest.rollups.len(),
+            cache_dir.display()
+        );
         println!("{}", manifest_json);
     }
 
@@ -1727,7 +1794,9 @@ fn write_parquet(
         .map_err(|e| format!("Failed to open DuckDB: {}", e))?;
 
     // Build column definitions (all as VARCHAR for simplicity; Parquet will store as string columns)
-    let columns: Vec<String> = data.columns.iter()
+    let columns: Vec<String> = data
+        .columns
+        .iter()
         .map(|c| format!("\"{}\" VARCHAR", c.replace('"', "\"\"")))
         .collect();
     let create_sql = format!("CREATE TABLE __export ({})", columns.join(", "));
@@ -1739,7 +1808,9 @@ fn write_parquet(
     let insert_sql = format!("INSERT INTO __export VALUES ({})", placeholders.join(", "));
 
     for row in &data.rows {
-        let values: Vec<String> = data.columns.iter()
+        let values: Vec<String> = data
+            .columns
+            .iter()
             .map(|col| {
                 row.get(col)
                     .map(|v| match v {
@@ -1750,9 +1821,8 @@ fn write_parquet(
                     .unwrap_or_default()
             })
             .collect();
-        let params: Vec<&dyn duckdb::ToSql> = values.iter()
-            .map(|v| v as &dyn duckdb::ToSql)
-            .collect();
+        let params: Vec<&dyn duckdb::ToSql> =
+            values.iter().map(|v| v as &dyn duckdb::ToSql).collect();
         conn.execute(&insert_sql, params.as_slice())
             .map_err(|e| format!("Failed to insert row: {}", e))?;
     }
@@ -1762,7 +1832,8 @@ fn write_parquet(
     conn.execute_batch(&format!(
         "COPY __export TO '{}' (FORMAT PARQUET)",
         path_str.replace('\'', "''")
-    )).map_err(|e| format!("Failed to export Parquet: {}", e))?;
+    ))
+    .map_err(|e| format!("Failed to export Parquet: {}", e))?;
 
     Ok(())
 }
@@ -1915,18 +1986,31 @@ fn run_execute(
             let manifest_path = cache_dir.join("manifest.json");
             if manifest_path.is_file() {
                 if let Ok(manifest_content) = std::fs::read_to_string(&manifest_path) {
-                    if let Ok(local_manifest) = serde_json::from_str::<crate::engine::preagg::LocalManifest>(&manifest_content) {
-                        if let Some(entry) = crate::engine::preagg::check_coverage(&request, &local_manifest.rollups) {
+                    if let Ok(local_manifest) = serde_json::from_str::<
+                        crate::engine::preagg::LocalManifest,
+                    >(&manifest_content)
+                    {
+                        if let Some(entry) =
+                            crate::engine::preagg::check_coverage(&request, &local_manifest.rollups)
+                        {
                             let parquet_path = cache_dir.join(&entry.file);
                             if parquet_path.is_file() {
                                 #[cfg(feature = "exec-duckdb")]
                                 {
                                     let parquet_str = parquet_path.to_str().unwrap_or("");
-                                    let reagg_sql = crate::engine::preagg::generate_reagg_sql(&request, entry, parquet_str);
+                                    let reagg_sql = crate::engine::preagg::generate_reagg_sql(
+                                        &request,
+                                        entry,
+                                        parquet_str,
+                                    );
                                     if let Ok(duck_conn) = duckdb::Connection::open_in_memory() {
                                         if let Ok(mut stmt) = duck_conn.prepare(&reagg_sql) {
                                             let columns: Vec<String> = (0..stmt.column_count())
-                                                .map(|i| stmt.column_name(i).map_or("?", |v| v).to_string())
+                                                .map(|i| {
+                                                    stmt.column_name(i)
+                                                        .map_or("?", |v| v)
+                                                        .to_string()
+                                                })
                                                 .collect();
                                             if let Ok(mut duckdb_rows) = stmt.query([]) {
                                                 let mut rows = Vec::new();
@@ -1934,7 +2018,9 @@ fn run_execute(
                                                     match duckdb_rows.next() {
                                                         Ok(Some(row)) => {
                                                             let mut obj = serde_json::Map::new();
-                                                            for (i, col) in columns.iter().enumerate() {
+                                                            for (i, col) in
+                                                                columns.iter().enumerate()
+                                                            {
                                                                 let val = crate::executor::duckdb::duckdb_value_to_json(row, i);
                                                                 obj.insert(col.clone(), val);
                                                             }
@@ -1944,9 +2030,16 @@ fn run_execute(
                                                         Err(_) => break,
                                                     }
                                                 }
-                                                let exec_result = crate::executor::ExecutionResult { columns, rows };
+                                                let exec_result =
+                                                    crate::executor::ExecutionResult {
+                                                        columns,
+                                                        rows,
+                                                    };
                                                 return Ok(QueryEnvelope::success(
-                                                    result.sql, &result.columns, exec_result, views_used,
+                                                    result.sql,
+                                                    &result.columns,
+                                                    exec_result,
+                                                    views_used,
                                                 ));
                                             }
                                         }
@@ -1964,60 +2057,109 @@ fn run_execute(
             if let Some(config_path) = ctx.config_path.as_ref() {
                 if let Ok(content) = std::fs::read_to_string(config_path) {
                     if let Ok(partial) = serde_yaml::from_str::<PartialConfig>(&content) {
-                        if let Ok(exec_config) = serde_yaml::from_str::<crate::executor::ExecutionConfig>(&content) {
+                        if let Ok(exec_config) =
+                            serde_yaml::from_str::<crate::executor::ExecutionConfig>(&content)
+                        {
                             let connection_result = if let Some(ds) = datasource {
                                 exec_config.find_connection(ds)
                             } else {
                                 exec_config.first_connection()
                             };
                             if let Ok(ref connection) = connection_result {
-                                let preagg_schema = partial.pre_aggregations
+                                let preagg_schema = partial
+                                    .pre_aggregations
                                     .as_ref()
                                     .and_then(|pa| pa.schema.clone())
                                     .unwrap_or_else(|| "AIRLAYER".to_string());
 
                                 // Detect ClickHouse using the selected datasource (not just the first)
                                 let is_clickhouse = if let Some(ds) = datasource {
-                                    partial.databases.iter()
+                                    partial
+                                        .databases
+                                        .iter()
                                         .find(|d| d.name == ds)
-                                        .map(|d| d.db_type.as_str()) == Some("clickhouse")
+                                        .map(|d| d.db_type.as_str())
+                                        == Some("clickhouse")
                                 } else {
-                                    partial.databases.first()
-                                        .map(|d| d.db_type.as_str()) == Some("clickhouse")
+                                    partial.databases.first().map(|d| d.db_type.as_str())
+                                        == Some("clickhouse")
                                 };
 
                                 let manifest_sql = format!(
                                     "SELECT view_name, rollup_name, rollup_hash, table_name, \
                                      dimensions, measures, time_dimension, granularity, build_date \
                                      FROM {}.{}{}",
-                                    preagg_schema, "__manifest",
+                                    preagg_schema,
+                                    "__manifest",
                                     if is_clickhouse { " FINAL" } else { "" }
                                 );
-                                if let Ok(manifest_result) = crate::executor::execute(connection, &manifest_sql, &[]) {
-                                    let rollup_entries: Vec<crate::engine::preagg::LocalRollupEntry> = manifest_result.rows.iter()
+                                if let Ok(manifest_result) =
+                                    crate::executor::execute(connection, &manifest_sql, &[])
+                                {
+                                    let rollup_entries: Vec<
+                                        crate::engine::preagg::LocalRollupEntry,
+                                    > = manifest_result
+                                        .rows
+                                        .iter()
                                         .filter_map(|row| {
                                             Some(crate::engine::preagg::LocalRollupEntry {
-                                                view_name: row.get("view_name")?.as_str()?.to_string(),
-                                                rollup_name: row.get("rollup_name")?.as_str()?.to_string(),
-                                                rollup_hash: row.get("rollup_hash")?.as_str()?.to_string(),
+                                                view_name: row
+                                                    .get("view_name")?
+                                                    .as_str()?
+                                                    .to_string(),
+                                                rollup_name: row
+                                                    .get("rollup_name")?
+                                                    .as_str()?
+                                                    .to_string(),
+                                                rollup_hash: row
+                                                    .get("rollup_hash")?
+                                                    .as_str()?
+                                                    .to_string(),
                                                 file: String::new(),
-                                                dimensions: serde_json::from_str(row.get("dimensions")?.as_str()?).unwrap_or_default(),
-                                                measures: serde_json::from_str(row.get("measures")?.as_str()?).unwrap_or_default(),
-                                                time_dimension: row.get("time_dimension").and_then(|v| v.as_str()).filter(|s| !s.is_empty()).map(|s| s.to_string()),
-                                                granularity: row.get("granularity").and_then(|v| v.as_str()).filter(|s| !s.is_empty()).map(|s| s.to_string()),
-                                                build_date: row.get("build_date").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                                                dimensions: serde_json::from_str(
+                                                    row.get("dimensions")?.as_str()?,
+                                                )
+                                                .unwrap_or_default(),
+                                                measures: serde_json::from_str(
+                                                    row.get("measures")?.as_str()?,
+                                                )
+                                                .unwrap_or_default(),
+                                                time_dimension: row
+                                                    .get("time_dimension")
+                                                    .and_then(|v| v.as_str())
+                                                    .filter(|s| !s.is_empty())
+                                                    .map(|s| s.to_string()),
+                                                granularity: row
+                                                    .get("granularity")
+                                                    .and_then(|v| v.as_str())
+                                                    .filter(|s| !s.is_empty())
+                                                    .map(|s| s.to_string()),
+                                                build_date: row
+                                                    .get("build_date")
+                                                    .and_then(|v| v.as_str())
+                                                    .unwrap_or("")
+                                                    .to_string(),
                                             })
                                         })
                                         .collect();
 
-                                    if let Some(entry) = crate::engine::preagg::check_coverage(&request, &rollup_entries) {
+                                    if let Some(entry) = crate::engine::preagg::check_coverage(
+                                        &request,
+                                        &rollup_entries,
+                                    ) {
                                         // Get the actual table name from the manifest
-                                        let actual_table = manifest_result.rows.iter()
+                                        let actual_table = manifest_result
+                                            .rows
+                                            .iter()
                                             .find(|row| {
-                                                row.get("rollup_hash").and_then(|v| v.as_str()) == Some(&entry.rollup_hash) &&
-                                                row.get("view_name").and_then(|v| v.as_str()) == Some(&entry.view_name)
+                                                row.get("rollup_hash").and_then(|v| v.as_str())
+                                                    == Some(&entry.rollup_hash)
+                                                    && row.get("view_name").and_then(|v| v.as_str())
+                                                        == Some(&entry.view_name)
                                             })
-                                            .and_then(|row| row.get("table_name").and_then(|v| v.as_str()))
+                                            .and_then(|row| {
+                                                row.get("table_name").and_then(|v| v.as_str())
+                                            })
                                             .unwrap_or("");
 
                                         if !actual_table.is_empty() {
@@ -2026,14 +2168,24 @@ fn run_execute(
                                             // Currently the function ignores the dialect argument
                                             // and always generates DuckDB-flavored SQL with table
                                             // substitution, so ClickHouse is a safe placeholder.
-                                            let reagg_sql = crate::engine::preagg::generate_warehouse_reagg_sql(
-                                                &request, entry, actual_table,
-                                                &crate::dialect::Dialect::ClickHouse,
-                                            );
+                                            let reagg_sql =
+                                                crate::engine::preagg::generate_warehouse_reagg_sql(
+                                                    &request,
+                                                    entry,
+                                                    actual_table,
+                                                    &crate::dialect::Dialect::ClickHouse,
+                                                );
 
-                                            if let Ok(exec_result) = crate::executor::execute(connection, &reagg_sql, &[]) {
+                                            if let Ok(exec_result) = crate::executor::execute(
+                                                connection,
+                                                &reagg_sql,
+                                                &[],
+                                            ) {
                                                 return Ok(QueryEnvelope::success(
-                                                    result.sql, &result.columns, exec_result, views_used,
+                                                    result.sql,
+                                                    &result.columns,
+                                                    exec_result,
+                                                    views_used,
                                                 ));
                                             }
                                         }
