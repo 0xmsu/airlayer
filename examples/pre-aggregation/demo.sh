@@ -7,6 +7,7 @@
 #   ./demo.sh        # run the demo
 set -euo pipefail
 cd "$(dirname "$0")"
+trap 'echo ""; read -r -p "Press Enter to close..."' EXIT
 
 REPO_ROOT="$(cd ../.. && pwd)"
 
