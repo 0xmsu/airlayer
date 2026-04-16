@@ -28,7 +28,7 @@ pub enum ForeignFormat {
 
 impl ForeignFormat {
     /// Parse a format name string (case-insensitive).
-    pub fn from_str(s: &str) -> Option<Self> {
+    pub fn parse_name(s: &str) -> Option<Self> {
         match s.to_lowercase().as_str() {
             "cube" | "cubejs" | "cube.js" | "cube_js" => Some(Self::Cube),
             "lookml" | "looker" | "lkml" => Some(Self::LookML),

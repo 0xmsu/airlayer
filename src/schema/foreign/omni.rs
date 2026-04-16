@@ -30,6 +30,7 @@ struct OmniFile {
 
 /// An Omni view definition.
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)]
 struct OmniView {
     #[serde(default, alias = "sql_table_name")]
     sql_table_name: Option<String>,
@@ -59,6 +60,7 @@ struct OmniDerivedTable {
 }
 
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)]
 struct OmniDimension {
     #[serde(rename = "type", default)]
     dim_type: Option<String>,
@@ -89,6 +91,7 @@ struct OmniDimensionGroup {
 }
 
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)]
 struct OmniMeasure {
     #[serde(rename = "type")]
     measure_type: Option<String>,
@@ -105,6 +108,7 @@ struct OmniMeasure {
 }
 
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)]
 struct OmniFilter {
     #[serde(rename = "type", default)]
     filter_type: Option<String>,
@@ -115,6 +119,7 @@ struct OmniFilter {
 }
 
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)]
 struct OmniSet {
     #[serde(default)]
     fields: Vec<String>,
@@ -122,6 +127,7 @@ struct OmniSet {
 
 /// An Omni topic (like a LookML explore).
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)]
 struct OmniTopic {
     #[serde(default)]
     base_view: Option<String>,
@@ -134,6 +140,7 @@ struct OmniTopic {
 }
 
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)]
 struct OmniJoin {
     #[serde(default)]
     sql_on: Option<String>,

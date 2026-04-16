@@ -31,6 +31,7 @@ struct DbtFile {
 
 /// A dbt semantic model — the core modeling unit.
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)]
 struct DbtSemanticModel {
     name: String,
     #[serde(default)]
@@ -64,6 +65,7 @@ struct DbtNodeRelation {
 }
 
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)]
 struct DbtDefaults {
     #[serde(default)]
     agg_time_dimension: Option<String>,
@@ -81,6 +83,7 @@ struct DbtEntity {
 }
 
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)]
 struct DbtDimension {
     name: String,
     #[serde(rename = "type")]
@@ -98,6 +101,7 @@ struct DbtDimension {
 }
 
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)]
 struct DbtDimensionTypeParams {
     #[serde(default)]
     time_granularity: Option<String>,
@@ -106,6 +110,7 @@ struct DbtDimensionTypeParams {
 }
 
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)]
 struct DbtMeasure {
     name: String,
     /// Aggregation type: sum, count, count_distinct, average, min, max, median, etc.
@@ -141,6 +146,7 @@ struct DbtMeasureFilter {
 
 /// A dbt metric definition.
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)]
 struct DbtMetric {
     name: String,
     #[serde(rename = "type")]
@@ -156,6 +162,7 @@ struct DbtMetric {
 }
 
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)]
 struct DbtMetricTypeParams {
     /// For simple metrics — reference to a measure.
     #[serde(default)]
@@ -182,6 +189,7 @@ struct DbtMetricTypeParams {
 /// A measure reference in a metric (can be a string or an object).
 #[derive(Debug, Deserialize)]
 #[serde(untagged)]
+#[allow(dead_code)]
 enum DbtMetricMeasureRef {
     Name(String),
     Object {
@@ -201,6 +209,7 @@ impl DbtMetricMeasureRef {
 }
 
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)]
 struct DbtDerivedMetricInput {
     name: String,
     #[serde(default)]

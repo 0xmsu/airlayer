@@ -1429,7 +1429,7 @@ fn run_convert(
     dialect: Option<&str>,
     to_stdout: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let format = ForeignFormat::from_str(format_str).ok_or_else(|| {
+    let format = ForeignFormat::parse_name(format_str).ok_or_else(|| {
         format!(
             "Unknown format '{}'. Supported: cube, lookml, dbt, omni",
             format_str

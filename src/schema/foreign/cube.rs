@@ -31,6 +31,7 @@ struct CubeFile {
 
 /// A single cube definition.
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)]
 struct CubeDef {
     name: String,
     #[serde(default)]
@@ -59,6 +60,7 @@ struct CubeDef {
 }
 
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)]
 struct CubeDimension {
     name: String,
     #[serde(default)]
@@ -83,6 +85,7 @@ struct CubeDimension {
 }
 
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)]
 struct CubeMeasure {
     name: String,
     #[serde(default)]
