@@ -58,7 +58,22 @@ fn load_cube_parity_engine() -> SemanticEngine {
 
 /// Execute a SQL query against the parity Postgres and return rows as string columns.
 fn execute_sql(client: &mut postgres::Client, sql: &str) -> Vec<Vec<String>> {
-    let rows = client.query(sql, &[]).expect("SQL execution failed");
+    execute_sql_params(client, sql, &[])
+}
+
+/// Execute a parameterized SQL query.
+fn execute_sql_params(
+    client: &mut postgres::Client,
+    sql: &str,
+    params: &[String],
+) -> Vec<Vec<String>> {
+    let param_refs: Vec<&(dyn postgres::types::ToSql + Sync)> = params
+        .iter()
+        .map(|s| s as &(dyn postgres::types::ToSql + Sync))
+        .collect();
+    let rows = client
+        .query(sql, &param_refs)
+        .expect("SQL execution failed");
     rows.iter()
         .map(|row| {
             (0..row.len())
@@ -266,7 +281,7 @@ fn cube_parity_dimension_filter() {
     };
 
     let result = engine.compile_query(&request).unwrap();
-    let airlayer_rows = execute_sql(&mut client, &result.sql);
+    let airlayer_rows = execute_sql_params(&mut client, &result.sql, &result.params);
 
     let expected_rows = execute_sql(
         &mut client,
