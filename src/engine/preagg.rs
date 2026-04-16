@@ -245,6 +245,8 @@ pub fn generate_build_sql(
     // Build SELECT columns
     let mut select_cols: Vec<String> = Vec::new();
     let mut group_by_cols: Vec<String> = Vec::new();
+    // Track quoted aliases for ClickHouse ORDER BY (needs column names, not positional refs)
+    let mut group_by_aliases: Vec<String> = Vec::new();
 
     // 1. Dimensions
     for dim_name in &rollup.dimensions {
@@ -252,6 +254,7 @@ pub fn generate_build_sql(
             let alias = dialect.quote_identifier(dim_name);
             select_cols.push(format!("{} AS {}", dim.expr, alias));
             group_by_cols.push(dim.expr.clone());
+            group_by_aliases.push(alias);
         }
     }
 
@@ -262,6 +265,7 @@ pub fn generate_build_sql(
             let alias = dialect.quote_identifier(&format!("{}__{}", td_name, gran));
             select_cols.push(format!("{} AS {}", trunc_expr, alias));
             group_by_cols.push(trunc_expr);
+            group_by_aliases.push(alias);
         }
     }
 
@@ -270,6 +274,7 @@ pub fn generate_build_sql(
         let alias = dialect.quote_identifier(col);
         select_cols.push(format!("{} AS {}", col, alias));
         group_by_cols.push(col.clone());
+        group_by_aliases.push(alias);
     }
 
     // 4. Measure columns
@@ -328,10 +333,9 @@ pub fn generate_build_sql(
         .collect::<Vec<_>>()
         .join(", ");
 
-    let order_by = group_by.clone();
-
     let ctas = match dialect {
         Dialect::ClickHouse => {
+            let order_by = group_by_aliases.join(", ");
             format!(
                 "CREATE TABLE {fq_table}\nENGINE = MergeTree()\nORDER BY ({order_by})\nAS\nSELECT\n    {select}\nFROM {source}\nGROUP BY {group_by}",
             )
