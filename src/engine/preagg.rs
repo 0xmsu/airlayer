@@ -2099,7 +2099,12 @@ mod tests {
             // Check type names
             match dialect {
                 Dialect::ClickHouse => {
-                    assert!(sql.contains("String"), "{}: missing String type: {}", dialect, sql);
+                    assert!(
+                        sql.contains("String"),
+                        "{}: missing String type: {}",
+                        dialect,
+                        sql
+                    );
                     assert!(
                         sql.contains("ReplacingMergeTree"),
                         "{}: missing engine: {}",
@@ -2108,7 +2113,12 @@ mod tests {
                     );
                 }
                 Dialect::BigQuery => {
-                    assert!(sql.contains("STRING"), "{}: missing STRING type: {}", dialect, sql);
+                    assert!(
+                        sql.contains("STRING"),
+                        "{}: missing STRING type: {}",
+                        dialect,
+                        sql
+                    );
                     assert!(
                         !sql.contains("PRIMARY KEY"),
                         "{}: BigQuery should not have PK: {}",
@@ -2117,8 +2127,18 @@ mod tests {
                     );
                 }
                 Dialect::SQLite => {
-                    assert!(sql.contains("TEXT"), "{}: missing TEXT type: {}", dialect, sql);
-                    assert!(sql.contains("UNIQUE"), "{}: missing UNIQUE: {}", dialect, sql);
+                    assert!(
+                        sql.contains("TEXT"),
+                        "{}: missing TEXT type: {}",
+                        dialect,
+                        sql
+                    );
+                    assert!(
+                        sql.contains("UNIQUE"),
+                        "{}: missing UNIQUE: {}",
+                        dialect,
+                        sql
+                    );
                 }
                 _ => {
                     assert!(
@@ -2173,12 +2193,7 @@ mod tests {
                     );
                 }
                 _ => {
-                    assert_eq!(
-                        stmts.len(),
-                        2,
-                        "{}: should have DELETE + INSERT",
-                        dialect
-                    );
+                    assert_eq!(stmts.len(), 2, "{}: should have DELETE + INSERT", dialect);
                     assert!(
                         stmts[0].contains("DELETE FROM"),
                         "{}: first should be DELETE: {}",
@@ -2209,7 +2224,12 @@ mod tests {
             let sql = generate_warehouse_reagg_sql(&request, &entry, &table, &dialect);
 
             // All dialects should have SELECT, FROM, GROUP BY
-            assert!(sql.contains("SELECT"), "{}: missing SELECT: {}", dialect, sql);
+            assert!(
+                sql.contains("SELECT"),
+                "{}: missing SELECT: {}",
+                dialect,
+                sql
+            );
             assert!(
                 sql.contains(&table),
                 "{}: missing table name: {}",
@@ -2387,18 +2407,8 @@ mod tests {
                 dialect,
                 sql
             );
-            assert!(
-                sql.contains("MAX("),
-                "{}: missing MAX: {}",
-                dialect,
-                sql
-            );
-            assert!(
-                sql.contains("MIN("),
-                "{}: missing MIN: {}",
-                dialect,
-                sql
-            );
+            assert!(sql.contains("MAX("), "{}: missing MAX: {}", dialect, sql);
+            assert!(sql.contains("MIN("), "{}: missing MIN: {}", dialect, sql);
             assert!(
                 sql.contains("COUNT(DISTINCT"),
                 "{}: missing COUNT DISTINCT: {}",
