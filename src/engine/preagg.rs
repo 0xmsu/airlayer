@@ -587,14 +587,17 @@ fn render_filter_sql(
             Some(format!("({})", parts.join(" AND ")))
         }
     } else if let Some(ref or) = filter.or {
-        let parts: Vec<String> = or
+        // For OR, all branches must be renderable — dropping any branch
+        // would incorrectly narrow results (the missing branch might match rows).
+        let parts: Vec<Option<String>> = or
             .iter()
-            .filter_map(|f| render_filter_sql(f, entry, quote))
+            .map(|f| render_filter_sql(f, entry, quote))
             .collect();
-        if parts.is_empty() {
+        if parts.is_empty() || parts.iter().any(|p| p.is_none()) {
             None
         } else {
-            Some(format!("({})", parts.join(" OR ")))
+            let rendered: Vec<String> = parts.into_iter().flatten().collect();
+            Some(format!("({})", rendered.join(" OR ")))
         }
     } else {
         None
@@ -617,6 +620,26 @@ fn build_reagg_where_clause(
     } else {
         format!("\nWHERE {}", parts.join(" AND "))
     }
+}
+
+/// Build an ORDER BY clause from request order specs for re-aggregation queries.
+fn build_reagg_order_by(
+    request: &crate::engine::query::QueryRequest,
+    quote: &dyn Fn(&str) -> String,
+) -> String {
+    if request.order.is_empty() {
+        return String::new();
+    }
+    let parts: Vec<String> = request
+        .order
+        .iter()
+        .map(|o| {
+            let col = o.id.replace('.', "__");
+            let dir = if o.desc { " DESC" } else { " ASC" };
+            format!("{}{}", quote(&col), dir)
+        })
+        .collect();
+    format!("\nORDER BY {}", parts.join(", "))
 }
 
 fn covers(request: &crate::engine::query::QueryRequest, entry: &LocalRollupEntry) -> bool {
@@ -859,6 +882,7 @@ pub fn generate_reagg_sql(
         format!("\nGROUP BY {}", group_by_cols.join(", "))
     };
 
+    let order_by = build_reagg_order_by(request, &|name| format!("\"{}\"", name));
     let limit = request
         .limit
         .map(|l| format!("\nLIMIT {}", l))
@@ -869,7 +893,7 @@ pub fn generate_reagg_sql(
         .unwrap_or_default();
 
     format!(
-        "SELECT {select}\nFROM read_parquet('{path}'){where_clause}{group_by}{limit}{offset}",
+        "SELECT {select}\nFROM read_parquet('{path}'){where_clause}{group_by}{order_by}{limit}{offset}",
         path = parquet_path.replace('\'', "''"),
     )
 }
@@ -1038,6 +1062,8 @@ pub fn generate_warehouse_reagg_sql(
         )
     };
 
+    let dialect_clone2 = dialect.clone();
+    let order_by = build_reagg_order_by(request, &|name| dialect_clone2.quote_identifier(name));
     let limit = request
         .limit
         .map(|l| format!("\nLIMIT {}", l))
@@ -1047,7 +1073,7 @@ pub fn generate_warehouse_reagg_sql(
         .map(|o| format!("\nOFFSET {}", o))
         .unwrap_or_default();
 
-    format!("SELECT {select}\nFROM {table_name}{where_clause}{group_by}{limit}{offset}",)
+    format!("SELECT {select}\nFROM {table_name}{where_clause}{group_by}{order_by}{limit}{offset}",)
 }
 
 /// Build a ManifestEntry from a view and rollup spec.
@@ -1251,31 +1277,30 @@ pub fn resolve_warehouse(
     schema: &str,
     dialect: &Dialect,
 ) -> Option<PreaggResolution> {
-    // Convert to LocalRollupEntry for coverage checking
-    let local_entries: Vec<LocalRollupEntry> = entries.iter().map(|e| e.to_local_entry()).collect();
-    let matched = check_coverage(request, &local_entries)?;
+    // Single pass: convert one at a time, check coverage, keep the match
+    for entry in entries {
+        if entry.table_name.is_empty() {
+            continue;
+        }
+        let local = entry.to_local_entry();
+        if !covers(request, &local) {
+            continue;
+        }
 
-    // Find the corresponding WarehouseRollupEntry to get table_name
-    let warehouse_entry = entries
-        .iter()
-        .find(|e| e.rollup_hash == matched.rollup_hash && e.view_name == matched.view_name)?;
+        // Re-quote the stored table name using the dialect
+        let fq_table = if let Some((s, t)) = entry.table_name.split_once('.') {
+            dialect.qualify_table(s, t)
+        } else {
+            dialect.qualify_table(schema, &entry.table_name)
+        };
 
-    if warehouse_entry.table_name.is_empty() {
-        return None;
+        let reagg_sql = generate_warehouse_reagg_sql(request, &local, &fq_table, dialect);
+        return Some(PreaggResolution::WarehouseRollup {
+            reagg_sql,
+            table_name: fq_table,
+        });
     }
-
-    // Re-quote the stored table name using the dialect
-    let fq_table = if let Some((s, t)) = warehouse_entry.table_name.split_once('.') {
-        dialect.qualify_table(s, t)
-    } else {
-        dialect.qualify_table(schema, &warehouse_entry.table_name)
-    };
-
-    let reagg_sql = generate_warehouse_reagg_sql(request, matched, &fq_table, dialect);
-    Some(PreaggResolution::WarehouseRollup {
-        reagg_sql,
-        table_name: fq_table,
-    })
+    None
 }
 
 /// Generate a complete build plan for the given views.
@@ -2204,6 +2229,138 @@ mod tests {
             !measure_names.contains(&"computed"),
             "Number should be excluded"
         );
+    }
+
+    #[test]
+    fn test_reagg_sql_order_by() {
+        use crate::engine::query::OrderBy;
+        let entry = test_local_rollup_entry();
+        let request = QueryRequest {
+            measures: vec!["orders.total_revenue".to_string()],
+            dimensions: vec!["orders.region".to_string()],
+            order: vec![OrderBy {
+                id: "orders.total_revenue".to_string(),
+                desc: true,
+            }],
+            limit: Some(10),
+            ..QueryRequest::new()
+        };
+        let sql = generate_reagg_sql(&request, &entry, "/data/orders.parquet");
+        assert!(
+            sql.contains("ORDER BY \"orders__total_revenue\" DESC"),
+            "Missing ORDER BY: {}",
+            sql
+        );
+        // ORDER BY must come before LIMIT
+        let order_pos = sql.find("ORDER BY").unwrap();
+        let limit_pos = sql.find("LIMIT").unwrap();
+        assert!(
+            order_pos < limit_pos,
+            "ORDER BY must precede LIMIT: {}",
+            sql
+        );
+    }
+
+    #[test]
+    fn test_warehouse_reagg_sql_order_by() {
+        use crate::engine::query::OrderBy;
+        let entry = test_local_rollup_entry();
+        let request = QueryRequest {
+            measures: vec!["orders.total_revenue".to_string()],
+            dimensions: vec!["orders.region".to_string()],
+            order: vec![
+                OrderBy {
+                    id: "orders.total_revenue".to_string(),
+                    desc: true,
+                },
+                OrderBy {
+                    id: "orders.region".to_string(),
+                    desc: false,
+                },
+            ],
+            ..QueryRequest::new()
+        };
+        let sql = generate_warehouse_reagg_sql(
+            &request,
+            &entry,
+            "\"preagg\".\"orders__abc\"",
+            &crate::dialect::Dialect::Postgres,
+        );
+        assert!(
+            sql.contains("ORDER BY \"orders__total_revenue\" DESC, \"orders__region\" ASC"),
+            "Missing multi-column ORDER BY: {}",
+            sql
+        );
+    }
+
+    #[test]
+    fn test_or_filter_drops_when_branch_unrenderable() {
+        use crate::engine::query::{FilterOperator, QueryFilter};
+        let entry = test_local_rollup_entry();
+        // OR filter where one branch uses a dimension not in the rollup
+        let filter = QueryFilter {
+            member: None,
+            operator: None,
+            values: vec![],
+            and: None,
+            or: Some(vec![
+                QueryFilter {
+                    member: Some("orders.region".to_string()),
+                    operator: Some(FilterOperator::Equals),
+                    values: vec!["US".to_string()],
+                    and: None,
+                    or: None,
+                },
+                QueryFilter {
+                    member: Some("orders.status".to_string()), // not in rollup
+                    operator: Some(FilterOperator::Equals),
+                    values: vec!["active".to_string()],
+                    and: None,
+                    or: None,
+                },
+            ]),
+        };
+        let result = render_filter_sql(&filter, &entry, &|name| format!("\"{}\"", name));
+        assert!(
+            result.is_none(),
+            "OR with unrenderable branch should return None, got: {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_or_filter_renders_when_all_branches_valid() {
+        use crate::engine::query::{FilterOperator, QueryFilter};
+        let entry = LocalRollupEntry {
+            dimensions: vec!["region".into(), "status".into()],
+            ..test_local_rollup_entry()
+        };
+        let filter = QueryFilter {
+            member: None,
+            operator: None,
+            values: vec![],
+            and: None,
+            or: Some(vec![
+                QueryFilter {
+                    member: Some("orders.region".to_string()),
+                    operator: Some(FilterOperator::Equals),
+                    values: vec!["US".to_string()],
+                    and: None,
+                    or: None,
+                },
+                QueryFilter {
+                    member: Some("orders.status".to_string()),
+                    operator: Some(FilterOperator::Equals),
+                    values: vec!["active".to_string()],
+                    and: None,
+                    or: None,
+                },
+            ]),
+        };
+        let result = render_filter_sql(&filter, &entry, &|name| format!("\"{}\"", name));
+        assert!(result.is_some(), "All-valid OR should render");
+        let sql = result.unwrap();
+        assert!(sql.contains("OR"), "Should contain OR: {}", sql);
     }
 
     // ── Comprehensive all-dialects tests ────────────────────────────────────
