@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
 # Seed a DuckDB warehouse with 1M events for the pre-aggregation demo.
+#
+# Usage: ./seed.sh  (do NOT dot-source with ". ./seed.sh")
+(
 set -euo pipefail
 cd "$(dirname "$0")"
-trap 'echo ""; read -r -p "Press Enter to close..."' EXIT
 
 mkdir -p data
 
@@ -44,3 +46,4 @@ SELECT COUNT(*) || ' rows seeded' FROM events;
 SQL
 
 echo "Done. Database: data/warehouse.duckdb"
+)

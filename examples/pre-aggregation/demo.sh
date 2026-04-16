@@ -5,9 +5,10 @@
 # Usage:
 #   ./seed.sh        # one-time: create 1M-row DuckDB warehouse
 #   ./demo.sh        # run the demo
+# Usage: ./demo.sh  (do NOT dot-source with ". ./demo.sh")
+(
 set -euo pipefail
 cd "$(dirname "$0")"
-trap 'echo ""; read -r -p "Press Enter to close..."' EXIT
 
 REPO_ROOT="$(cd ../.. && pwd)"
 
@@ -125,3 +126,4 @@ timed $AL query -x --config config.yml --no-cache \
 echo "${bold}Done!${reset}"
 echo "Cached queries read from tiny Parquet files (~1K rows)"
 echo "instead of scanning the full 1M-row table."
+)
