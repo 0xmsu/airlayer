@@ -199,6 +199,54 @@ Pre-aggregation generates dialect-aware SQL for all 11 supported databases:
 
 - All identifiers are uppercased when quoted (e.g., `"PLATFORM"`, `"__MANIFEST"`)
 
+## Library API
+
+All pre-aggregation logic is available as pure functions in `airlayer::engine::preagg` for use as a library (e.g., from oxy-internal). These functions perform no I/O — the caller handles database execution.
+
+### Query resolution
+
+```rust
+use airlayer::engine::preagg::{self, PreaggResolution};
+
+// Layer 1: local Parquet cache
+if let Some(PreaggResolution::LocalParquet { reagg_sql, parquet_path }) =
+    preagg::resolve_local(&request, &local_manifest, &cache_dir)
+{
+    // Execute reagg_sql against in-memory DuckDB
+}
+
+// Layer 2: warehouse rollup tables
+let manifest_sql = preagg::manifest_query_sql(&schema, &dialect);
+// ... execute manifest_sql, get rows ...
+let entries = preagg::parse_manifest_rows(&rows);
+if let Some(PreaggResolution::WarehouseRollup { reagg_sql, table_name }) =
+    preagg::resolve_warehouse(&request, &entries, &schema, &dialect)
+{
+    // Execute reagg_sql against the warehouse
+}
+```
+
+### Build planning
+
+```rust
+use airlayer::engine::preagg;
+
+let plan = preagg::collect_build_sql(&views, &schema, &date_str, &dialect);
+for stmt in &plan.statements {
+    // Execute each statement sequentially
+}
+// plan.manifest_entries contains metadata for reporting
+```
+
+### Key types
+
+| Type | Description |
+|------|-------------|
+| `PreaggResolution` | Enum: `LocalParquet { reagg_sql, parquet_path }` or `WarehouseRollup { reagg_sql, table_name }` |
+| `WarehouseRollupEntry` | A rollup entry from the warehouse `__manifest` table |
+| `BuildPlan` | All SQL statements + manifest entries for a build operation |
+| `LocalManifest` | The local `manifest.json` structure (from `pull`) |
+
 ## Example
 
 The `examples/pre-aggregation/` directory contains a complete working demo with a 500M-row DuckDB database:
