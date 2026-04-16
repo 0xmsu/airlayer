@@ -418,6 +418,11 @@ pub fn check_coverage<'a>(
 }
 
 fn covers(request: &crate::engine::query::QueryRequest, entry: &LocalRollupEntry) -> bool {
+    // Queries with filters cannot be served from cache (filter propagation not yet supported)
+    if !request.filters.is_empty() {
+        return false;
+    }
+
     // Extract view names from all member references
     let query_views = request.referenced_views();
 

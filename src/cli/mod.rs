@@ -3419,5 +3419,18 @@ airlayer inspect --queries
 airlayer inspect --json
 airlayer inspect --motifs --json
 airlayer inspect --queries --json
+
+# Pre-aggregate views into warehouse rollup tables
+airlayer build --config config.yml
+airlayer build --schema MY_SCHEMA --database warehouse --dry-run
+airlayer build --view orders
+
+# Download pre-aggregated data to local Parquet cache
+airlayer pull --config config.yml
+airlayer pull --view orders
+
+# Query with cache-aware execution (local cache → warehouse pre-agg → raw SQL)
+airlayer query -q '...' -x                    # uses cache if available
+airlayer query -q '...' -x --no-cache          # skip cache, go straight to raw SQL
 ```
 ";
