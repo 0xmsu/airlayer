@@ -500,6 +500,11 @@ fn collect_filter_members(filter: &crate::engine::query::QueryFilter, members: &
     }
 }
 
+/// Escape LIKE metacharacters (`%`, `_`) in a value being inlined into a LIKE pattern.
+fn escape_like(value: &str) -> String {
+    value.replace('%', "\\%").replace('_', "\\_")
+}
+
 /// Generate a WHERE clause fragment for a single filter, using quoted column names.
 /// Returns None if the filter cannot be translated.
 fn render_filter_sql(
@@ -558,20 +563,24 @@ fn render_filter_sql(
             FilterOperator::Contains => format!(
                 "{} LIKE '%{}%'",
                 col,
-                filter
-                    .values
-                    .first()
-                    .unwrap_or(&String::new())
-                    .replace('\'', "''")
+                escape_like(
+                    &filter
+                        .values
+                        .first()
+                        .unwrap_or(&String::new())
+                        .replace('\'', "''")
+                )
             ),
             FilterOperator::NotContains => format!(
                 "{} NOT LIKE '%{}%'",
                 col,
-                filter
-                    .values
-                    .first()
-                    .unwrap_or(&String::new())
-                    .replace('\'', "''")
+                escape_like(
+                    &filter
+                        .values
+                        .first()
+                        .unwrap_or(&String::new())
+                        .replace('\'', "''")
+                )
             ),
             _ => return None, // date-range filters not supported in reagg
         };
@@ -2361,6 +2370,74 @@ mod tests {
         assert!(result.is_some(), "All-valid OR should render");
         let sql = result.unwrap();
         assert!(sql.contains("OR"), "Should contain OR: {}", sql);
+    }
+
+    #[test]
+    fn test_contains_filter_escapes_like_metacharacters() {
+        use crate::engine::query::{FilterOperator, QueryFilter};
+        let entry = test_local_rollup_entry();
+        // Value with LIKE metacharacters: % and _
+        let filter = QueryFilter {
+            member: Some("orders.region".to_string()),
+            operator: Some(FilterOperator::Contains),
+            values: vec!["100%_test".to_string()],
+            and: None,
+            or: None,
+        };
+        let result = render_filter_sql(&filter, &entry, &|name| format!("\"{}\"", name));
+        let sql = result.unwrap();
+        // % and _ in the user value should be escaped
+        assert!(
+            sql.contains("100\\%\\_test"),
+            "LIKE metacharacters should be escaped: {}",
+            sql
+        );
+        // The wrapping wildcards should still be present
+        assert!(
+            sql.contains("LIKE '%100\\%\\_test%'"),
+            "Should have wrapping wildcards but escaped inner ones: {}",
+            sql
+        );
+    }
+
+    #[test]
+    fn test_not_contains_filter_escapes_like_metacharacters() {
+        use crate::engine::query::{FilterOperator, QueryFilter};
+        let entry = test_local_rollup_entry();
+        let filter = QueryFilter {
+            member: Some("orders.region".to_string()),
+            operator: Some(FilterOperator::NotContains),
+            values: vec!["50%".to_string()],
+            and: None,
+            or: None,
+        };
+        let result = render_filter_sql(&filter, &entry, &|name| format!("\"{}\"", name));
+        let sql = result.unwrap();
+        assert!(
+            sql.contains("NOT LIKE '%50\\%%'"),
+            "NotContains should escape % in value: {}",
+            sql
+        );
+    }
+
+    #[test]
+    fn test_contains_filter_normal_value_unchanged() {
+        use crate::engine::query::{FilterOperator, QueryFilter};
+        let entry = test_local_rollup_entry();
+        let filter = QueryFilter {
+            member: Some("orders.region".to_string()),
+            operator: Some(FilterOperator::Contains),
+            values: vec!["north".to_string()],
+            and: None,
+            or: None,
+        };
+        let result = render_filter_sql(&filter, &entry, &|name| format!("\"{}\"", name));
+        let sql = result.unwrap();
+        assert!(
+            sql.contains("LIKE '%north%'"),
+            "Normal value should be unchanged: {}",
+            sql
+        );
     }
 
     // ── Comprehensive all-dialects tests ────────────────────────────────────
