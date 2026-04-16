@@ -3071,3 +3071,172 @@ fn test_saved_query_steps_compile() {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// Pre-aggregation: ClickHouse build + coverage integration tests
+// ---------------------------------------------------------------------------
+#[cfg(feature = "exec")]
+mod preagg_tests {
+    use super::*;
+    use std::sync::Once;
+
+    static PREAGG_SEED: Once = Once::new();
+
+    fn ch_base_url() -> String {
+        load_test_ports();
+        let port = std::env::var("AIRLAYER_CH_HTTP_PORT").unwrap_or_else(|_| "18123".to_string());
+        format!("http://localhost:{}", port)
+    }
+
+    fn is_available() -> bool {
+        ureq::get(&format!("{}/ping", ch_base_url())).call().is_ok()
+    }
+
+    fn seed() {
+        PREAGG_SEED.call_once(|| {
+            // Reuse the ClickHouse seed (creates analytics.events)
+            for table in &["events"] {
+                let drop = format!("DROP TABLE IF EXISTS analytics.{}", table);
+                ureq::post(&format!("{}/", ch_base_url()))
+                    .send_string(&drop)
+                    .ok();
+            }
+            let seed_sql = include_str!("integration/seed/clickhouse.sql");
+            for stmt in seed_sql.split(';') {
+                let stripped: String = stmt
+                    .lines()
+                    .filter(|line| !line.trim_start().starts_with("--"))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                let trimmed = stripped.trim();
+                if !trimmed.is_empty()
+                    && (trimmed.contains("analytics.events")
+                        || trimmed.starts_with("CREATE DATABASE"))
+                {
+                    ureq::post(&format!("{}/", ch_base_url()))
+                        .send_string(trimmed)
+                        .ok();
+                }
+            }
+        });
+    }
+
+    #[test]
+    #[ignore = "tier2"]
+    fn preagg_resolve_rollups() {
+        // Unit-level: verify rollups resolve correctly from the test view
+        let views_dir =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/integration/views-preagg");
+        let dialects = DatasourceDialectMap::with_default(Dialect::ClickHouse);
+        let engine = SemanticEngine::load(&views_dir, None, dialects).expect("load");
+
+        let view = engine.view("events").expect("events view");
+        let rollups = airlayer::engine::preagg::resolve_rollups(view);
+        assert_eq!(rollups.len(), 1);
+        assert_eq!(rollups[0].name, "by_platform_daily");
+        assert_eq!(rollups[0].dimensions, vec!["platform"]);
+        assert_eq!(rollups[0].measures.len(), 3);
+    }
+
+    #[test]
+    #[ignore = "tier2"]
+    fn preagg_build_sql_generation() {
+        if !is_available() {
+            eprintln!("ClickHouse not available, skipping");
+            return;
+        }
+        seed();
+
+        let views_dir =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/integration/views-preagg");
+        let dialects = DatasourceDialectMap::with_default(Dialect::ClickHouse);
+        let engine = SemanticEngine::load(&views_dir, None, dialects).expect("load");
+
+        let view = engine.view("events").expect("events view");
+        let rollups = airlayer::engine::preagg::resolve_rollups(view);
+        let sqls = airlayer::engine::preagg::generate_build_sql(
+            view,
+            &rollups[0],
+            "airlayer_test_preagg",
+            "20260415",
+            &Dialect::ClickHouse,
+        );
+
+        assert!(!sqls.is_empty());
+        let ctas = &sqls[0];
+        assert!(ctas.contains("CREATE TABLE"), "CTAS: {}", ctas);
+        assert!(ctas.contains("airlayer_test_preagg"), "Schema: {}", ctas);
+        assert!(ctas.contains("total_events__count"), "Count col: {}", ctas);
+        assert!(ctas.contains("total_revenue__sum"), "Sum col: {}", ctas);
+        assert!(ctas.contains("user_id"), "CD col: {}", ctas);
+
+        // Execute: create schema + table
+        let create_db = "CREATE DATABASE IF NOT EXISTS airlayer_test_preagg";
+        ureq::post(&format!("{}/", ch_base_url()))
+            .send_string(create_db)
+            .expect("create db");
+
+        // Drop pre-existing table if any
+        let table_name = format!(
+            "airlayer_test_preagg.events__{}__20260415",
+            rollups[0].hash
+        );
+        let drop = format!("DROP TABLE IF EXISTS {}", table_name);
+        ureq::post(&format!("{}/", ch_base_url()))
+            .send_string(&drop)
+            .expect("drop");
+
+        // Execute CTAS
+        let resp = ureq::post(&format!("{}/", ch_base_url())).send_string(ctas);
+        assert!(resp.is_ok(), "CTAS failed: {:?}", resp.err());
+
+        // Verify data was created
+        let count_sql = format!("SELECT COUNT(*) FROM {}", table_name);
+        let count_resp = ureq::post(&format!("{}/", ch_base_url()))
+            .send_string(&count_sql)
+            .expect("count query");
+        let count_str = count_resp.into_string().expect("count response");
+        let count: i64 = count_str.trim().parse().unwrap_or(0);
+        assert!(count > 0, "Expected rows in pre-agg table, got: {}", count);
+
+        // Cleanup
+        ureq::post(&format!("{}/", ch_base_url()))
+            .send_string("DROP DATABASE IF EXISTS airlayer_test_preagg")
+            .ok();
+    }
+
+    #[test]
+    #[ignore = "tier2"]
+    fn preagg_coverage_check() {
+        let entry = airlayer::engine::preagg::LocalRollupEntry {
+            view_name: "events".into(),
+            rollup_name: "by_platform_daily".into(),
+            rollup_hash: "test1234".into(),
+            file: "events__test1234.parquet".into(),
+            dimensions: vec!["platform".into()],
+            measures: vec![
+                serde_json::json!({"name": "total_events", "type": "count", "columns": ["total_events__count"]}),
+                serde_json::json!({"name": "total_revenue", "type": "sum", "columns": ["total_revenue__sum"]}),
+            ],
+            time_dimension: Some("created_at".into()),
+            granularity: Some("day".into()),
+            build_date: "2026-04-15".into(),
+        };
+
+        // Covered query
+        let covered = QueryRequest {
+            measures: vec!["events.total_revenue".to_string()],
+            dimensions: vec!["events.platform".to_string()],
+            ..QueryRequest::new()
+        };
+        assert!(airlayer::engine::preagg::check_coverage(&covered, &[entry.clone()]).is_some());
+
+        // Not covered — dimension not in rollup
+        let not_covered = QueryRequest {
+            measures: vec!["events.total_revenue".to_string()],
+            dimensions: vec!["events.country".to_string()],
+            ..QueryRequest::new()
+        };
+        assert!(airlayer::engine::preagg::check_coverage(&not_covered, &[entry]).is_none());
+    }
+}
