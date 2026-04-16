@@ -1092,6 +1092,232 @@ pub fn build_manifest_entry(
     }
 }
 
+// ---------------------------------------------------------------------------
+// Library API: types and functions for callers (CLI, oxy-internal, etc.)
+// All functions below are pure computation — no I/O, no async needed.
+// ---------------------------------------------------------------------------
+
+/// Result of pre-aggregation cache resolution.
+///
+/// Returned by [`resolve_local`] and [`resolve_warehouse`]. The caller is
+/// responsible for executing the SQL against the appropriate database.
+#[derive(Debug, Clone)]
+pub enum PreaggResolution {
+    /// Query can be served from a local Parquet file via DuckDB.
+    LocalParquet {
+        /// Re-aggregation SQL to execute against an in-memory DuckDB connection.
+        reagg_sql: String,
+        /// Path to the Parquet file (joined from cache_dir + entry.file).
+        parquet_path: String,
+    },
+    /// Query can be served from a warehouse rollup table.
+    WarehouseRollup {
+        /// Re-aggregation SQL to execute against the warehouse.
+        reagg_sql: String,
+        /// Fully-qualified rollup table name (dialect-quoted).
+        table_name: String,
+    },
+}
+
+/// A rollup entry from the warehouse `__manifest` table.
+///
+/// Similar to [`LocalRollupEntry`] but carries `table_name` instead of
+/// `file`, since warehouse entries haven't been downloaded yet.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WarehouseRollupEntry {
+    pub view_name: String,
+    pub rollup_name: String,
+    pub rollup_hash: String,
+    pub table_name: String,
+    pub dimensions: Vec<String>,
+    pub measures: Vec<serde_json::Value>,
+    pub time_dimension: Option<String>,
+    pub granularity: Option<String>,
+    pub build_date: String,
+}
+
+impl WarehouseRollupEntry {
+    /// Convert to a [`LocalRollupEntry`] for use with [`check_coverage`].
+    pub fn to_local_entry(&self) -> LocalRollupEntry {
+        LocalRollupEntry {
+            view_name: self.view_name.clone(),
+            rollup_name: self.rollup_name.clone(),
+            rollup_hash: self.rollup_hash.clone(),
+            file: String::new(),
+            dimensions: self.dimensions.clone(),
+            measures: self.measures.clone(),
+            time_dimension: self.time_dimension.clone(),
+            granularity: self.granularity.clone(),
+            build_date: self.build_date.clone(),
+        }
+    }
+}
+
+/// A complete build plan: all SQL statements and manifest entries.
+///
+/// Returned by [`collect_build_sql`]. The caller executes `statements`
+/// sequentially, then uses `manifest_entries` for reporting.
+#[derive(Debug, Clone)]
+pub struct BuildPlan {
+    pub statements: Vec<String>,
+    pub manifest_entries: Vec<ManifestEntry>,
+}
+
+/// Generate the SQL to query the `__manifest` table in the warehouse.
+///
+/// Handles ClickHouse's `FINAL` clause for ReplacingMergeTree deduplication.
+pub fn manifest_query_sql(schema: &str, dialect: &Dialect) -> String {
+    let manifest_table = dialect.qualify_table(schema, "__manifest");
+    let final_clause = if *dialect == Dialect::ClickHouse {
+        " FINAL"
+    } else {
+        ""
+    };
+    format!(
+        "SELECT view_name, rollup_name, rollup_hash, table_name, \
+         dimensions, measures, time_dimension, granularity, build_date \
+         FROM {manifest_table}{final_clause}"
+    )
+}
+
+/// Parse raw JSON rows from a manifest query into [`WarehouseRollupEntry`] values.
+///
+/// Accepts the row format returned by any executor that produces
+/// `Vec<Map<String, Value>>`. Rows with missing required fields are skipped.
+pub fn parse_manifest_rows(
+    rows: &[serde_json::Map<String, serde_json::Value>],
+) -> Vec<WarehouseRollupEntry> {
+    rows.iter()
+        .filter_map(|row| {
+            Some(WarehouseRollupEntry {
+                view_name: row.get("view_name")?.as_str()?.to_string(),
+                rollup_name: row.get("rollup_name")?.as_str()?.to_string(),
+                rollup_hash: row.get("rollup_hash")?.as_str()?.to_string(),
+                table_name: row.get("table_name")?.as_str()?.to_string(),
+                dimensions: serde_json::from_str(row.get("dimensions")?.as_str()?)
+                    .unwrap_or_default(),
+                measures: serde_json::from_str(row.get("measures")?.as_str()?).unwrap_or_default(),
+                time_dimension: row
+                    .get("time_dimension")
+                    .and_then(|v| v.as_str())
+                    .filter(|s| !s.is_empty())
+                    .map(|s| s.to_string()),
+                granularity: row
+                    .get("granularity")
+                    .and_then(|v| v.as_str())
+                    .filter(|s| !s.is_empty())
+                    .map(|s| s.to_string()),
+                build_date: row
+                    .get("build_date")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string(),
+            })
+        })
+        .collect()
+}
+
+/// Try to resolve a query from the local Parquet cache.
+///
+/// Returns `Some(LocalParquet { ... })` if a cached rollup covers the query
+/// and the Parquet file exists on disk. Returns `None` otherwise.
+/// The caller should execute `reagg_sql` against an in-memory DuckDB connection.
+pub fn resolve_local(
+    request: &crate::engine::query::QueryRequest,
+    manifest: &LocalManifest,
+    cache_dir: &std::path::Path,
+) -> Option<PreaggResolution> {
+    let entry = check_coverage(request, &manifest.rollups)?;
+    let parquet_path = cache_dir.join(&entry.file);
+    if !parquet_path.is_file() {
+        return None;
+    }
+    let parquet_str = parquet_path.to_str()?;
+    let reagg_sql = generate_reagg_sql(request, entry, parquet_str);
+    Some(PreaggResolution::LocalParquet {
+        reagg_sql,
+        parquet_path: parquet_str.to_string(),
+    })
+}
+
+/// Try to resolve a query from warehouse rollup tables.
+///
+/// Returns `Some(WarehouseRollup { ... })` if a rollup covers the query.
+/// Returns `None` otherwise. The caller should execute `reagg_sql` against
+/// the warehouse connection.
+pub fn resolve_warehouse(
+    request: &crate::engine::query::QueryRequest,
+    entries: &[WarehouseRollupEntry],
+    schema: &str,
+    dialect: &Dialect,
+) -> Option<PreaggResolution> {
+    // Convert to LocalRollupEntry for coverage checking
+    let local_entries: Vec<LocalRollupEntry> = entries.iter().map(|e| e.to_local_entry()).collect();
+    let matched = check_coverage(request, &local_entries)?;
+
+    // Find the corresponding WarehouseRollupEntry to get table_name
+    let warehouse_entry = entries
+        .iter()
+        .find(|e| e.rollup_hash == matched.rollup_hash && e.view_name == matched.view_name)?;
+
+    if warehouse_entry.table_name.is_empty() {
+        return None;
+    }
+
+    // Re-quote the stored table name using the dialect
+    let fq_table = if let Some((s, t)) = warehouse_entry.table_name.split_once('.') {
+        dialect.qualify_table(s, t)
+    } else {
+        dialect.qualify_table(schema, &warehouse_entry.table_name)
+    };
+
+    let reagg_sql = generate_warehouse_reagg_sql(request, matched, &fq_table, dialect);
+    Some(PreaggResolution::WarehouseRollup {
+        reagg_sql,
+        table_name: fq_table,
+    })
+}
+
+/// Generate a complete build plan for the given views.
+///
+/// Returns all SQL statements to execute (in order) plus manifest entries
+/// for reporting. The caller is responsible for executing the statements.
+pub fn collect_build_sql(
+    views: &[&View],
+    schema: &str,
+    date_str: &str,
+    dialect: &Dialect,
+) -> BuildPlan {
+    let mut statements: Vec<String> = Vec::new();
+    let mut manifest_entries: Vec<ManifestEntry> = Vec::new();
+
+    // 1. Create schema/database (if the dialect supports it)
+    if let Some(ddl) = dialect.create_schema_ddl(schema) {
+        statements.push(ddl);
+    }
+
+    // 2. Create manifest table
+    statements.push(generate_manifest_create_sql(schema, dialect));
+
+    // 3. For each view, resolve rollups and generate CTAS + manifest entries
+    for view in views {
+        let rollups = resolve_rollups(view);
+        for rollup in &rollups {
+            let ctas_stmts = generate_build_sql(view, rollup, schema, date_str, dialect);
+            statements.extend(ctas_stmts);
+
+            let entry = build_manifest_entry(view, rollup, schema, date_str);
+            statements.extend(generate_manifest_upsert_sql(schema, &entry, dialect));
+            manifest_entries.push(entry);
+        }
+    }
+
+    BuildPlan {
+        statements,
+        manifest_entries,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2485,5 +2711,177 @@ mod tests {
                 }
             }
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // Library API tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_manifest_query_sql_basic() {
+        let sql = manifest_query_sql("AIRLAYER", &Dialect::Postgres);
+        assert!(sql.contains("SELECT view_name"));
+        assert!(sql.contains("\"AIRLAYER\".\"__manifest\""));
+        assert!(!sql.contains("FINAL"));
+    }
+
+    #[test]
+    fn test_manifest_query_sql_clickhouse_final() {
+        let sql = manifest_query_sql("preagg", &Dialect::ClickHouse);
+        assert!(sql.contains("\"preagg\".\"__manifest\" FINAL"));
+    }
+
+    #[test]
+    fn test_parse_manifest_rows() {
+        let rows = vec![serde_json::json!({
+            "view_name": "events",
+            "rollup_name": "by_platform",
+            "rollup_hash": "abc123",
+            "table_name": "AIRLAYER.events__abc123__20260415",
+            "dimensions": "[\"platform\"]",
+            "measures": "[{\"name\":\"count\",\"type\":\"count\",\"columns\":[\"count__count\"]}]",
+            "time_dimension": "created_at",
+            "granularity": "day",
+            "build_date": "2026-04-15"
+        })
+        .as_object()
+        .unwrap()
+        .clone()];
+
+        let entries = parse_manifest_rows(&rows);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].view_name, "events");
+        assert_eq!(entries[0].table_name, "AIRLAYER.events__abc123__20260415");
+        assert_eq!(entries[0].dimensions, vec!["platform"]);
+        assert_eq!(entries[0].time_dimension.as_deref(), Some("created_at"));
+        assert_eq!(entries[0].granularity.as_deref(), Some("day"));
+    }
+
+    #[test]
+    fn test_parse_manifest_rows_skips_incomplete() {
+        let rows = vec![
+            // Missing view_name — should be skipped
+            serde_json::json!({
+                "rollup_name": "x",
+                "rollup_hash": "y",
+                "table_name": "z",
+                "dimensions": "[]",
+                "measures": "[]",
+            })
+            .as_object()
+            .unwrap()
+            .clone(),
+        ];
+        let entries = parse_manifest_rows(&rows);
+        assert!(entries.is_empty());
+    }
+
+    #[test]
+    fn test_warehouse_rollup_entry_to_local() {
+        let wre = WarehouseRollupEntry {
+            view_name: "events".into(),
+            rollup_name: "by_platform".into(),
+            rollup_hash: "abc123".into(),
+            table_name: "AIRLAYER.events__abc123__20260415".into(),
+            dimensions: vec!["platform".into()],
+            measures: vec![
+                serde_json::json!({"name":"count","type":"count","columns":["count__count"]}),
+            ],
+            time_dimension: Some("created_at".into()),
+            granularity: Some("day".into()),
+            build_date: "2026-04-15".into(),
+        };
+        let local = wre.to_local_entry();
+        assert_eq!(local.view_name, "events");
+        assert!(local.file.is_empty());
+        assert_eq!(local.dimensions, vec!["platform"]);
+    }
+
+    #[test]
+    fn test_resolve_warehouse_basic() {
+        let entries = vec![WarehouseRollupEntry {
+            view_name: "events".into(),
+            rollup_name: "by_platform".into(),
+            rollup_hash: "abc123".into(),
+            table_name: "preagg.events__abc123__20260415".into(),
+            dimensions: vec!["platform".into()],
+            measures: vec![
+                serde_json::json!({"name":"total_revenue","type":"sum","columns":["total_revenue__sum"]}),
+            ],
+            time_dimension: None,
+            granularity: None,
+            build_date: "2026-04-15".into(),
+        }];
+
+        let request = QueryRequest {
+            measures: vec!["events.total_revenue".to_string()],
+            dimensions: vec!["events.platform".to_string()],
+            ..QueryRequest::new()
+        };
+
+        let result = resolve_warehouse(&request, &entries, "preagg", &Dialect::Postgres);
+        assert!(result.is_some());
+        if let Some(PreaggResolution::WarehouseRollup {
+            reagg_sql,
+            table_name,
+        }) = result
+        {
+            assert!(reagg_sql.contains("SELECT"));
+            assert!(table_name.contains("preagg"));
+        } else {
+            panic!("Expected WarehouseRollup");
+        }
+    }
+
+    #[test]
+    fn test_resolve_warehouse_miss() {
+        let entries = vec![WarehouseRollupEntry {
+            view_name: "events".into(),
+            rollup_name: "by_platform".into(),
+            rollup_hash: "abc123".into(),
+            table_name: "preagg.events__abc123__20260415".into(),
+            dimensions: vec!["platform".into()],
+            measures: vec![
+                serde_json::json!({"name":"total_revenue","type":"sum","columns":["total_revenue__sum"]}),
+            ],
+            time_dimension: None,
+            granularity: None,
+            build_date: "2026-04-15".into(),
+        }];
+
+        // Request a dimension not in the rollup
+        let request = QueryRequest {
+            measures: vec!["events.total_revenue".to_string()],
+            dimensions: vec!["events.country".to_string()],
+            ..QueryRequest::new()
+        };
+
+        let result = resolve_warehouse(&request, &entries, "preagg", &Dialect::Postgres);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_collect_build_sql() {
+        let view = test_view_with_preaggs();
+        let plan = collect_build_sql(&[&view], "preagg", "20260415", &Dialect::Postgres);
+
+        assert!(!plan.statements.is_empty());
+        // Should have: CREATE SCHEMA + CREATE TABLE __manifest + at least one CTAS + upsert
+        assert!(plan.statements.len() >= 4);
+        assert!(plan.statements[0].contains("CREATE SCHEMA"));
+        assert!(plan.statements[1].to_lowercase().contains("__manifest"));
+        assert!(!plan.manifest_entries.is_empty());
+        assert_eq!(plan.manifest_entries[0].view_name, "orders");
+    }
+
+    #[test]
+    fn test_collect_build_sql_bigquery_no_schema_ddl() {
+        let view = test_view_with_preaggs();
+        let plan = collect_build_sql(&[&view], "preagg", "20260415", &Dialect::BigQuery);
+
+        // BigQuery should NOT have a CREATE SCHEMA statement
+        assert!(!plan.statements[0].contains("CREATE SCHEMA"));
+        // First statement should be the manifest table
+        assert!(plan.statements[0].to_lowercase().contains("__manifest"));
     }
 }
