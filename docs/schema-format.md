@@ -455,6 +455,29 @@ steps:
 - Each saved query must have at least one step (or inline query fields)
 - Step names must be unique within a saved query
 
+## Pre-aggregation rollups
+
+Views can declare pre-aggregation rollups to materialize grouped data for faster queries:
+
+```yaml
+pre_aggregations:
+  - name: by_region_monthly
+    dimensions: [region]
+    measures: [total_revenue, order_count]
+    time_dimension: created_at
+    granularity: month
+```
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `name` | string | Yes | Unique rollup name within the view |
+| `dimensions` | string[] | No | Dimensions to GROUP BY |
+| `measures` | string[] | No | Measures to include (omit for all eligible) |
+| `time_dimension` | string | No | Time dimension for date-based grouping |
+| `granularity` | string | No | `day`, `week`, `month`, `quarter`, `year` |
+
+Eligible measure types: `sum`, `count`, `avg`, `min`, `max`, `count_distinct`. Non-aggregable types (`median`, `number`, `custom`) are excluded. See [pre-aggregation.md](pre-aggregation.md) for the full guide.
+
 ## Topic files (`.topic.yml`)
 
 Topics group views and provide descriptions for semantic search:

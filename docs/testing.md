@@ -103,6 +103,7 @@ BIGQUERY_ACCESS_TOKEN=$(gcloud auth print-access-token) cargo test --features ex
 - **DuckDB** (4 tests): Standard query, segment, unfiltered, measure value correctness
 - **SQLite** (4 tests): Standard query, segment, unfiltered, measure value correctness
 - **Parse-validation** (4 tests): Validates generated SQL parses correctly for BigQuery, Snowflake, Databricks, Redshift
+- **Pre-aggregation** (43 unit tests): Rollup resolution, coverage checking, re-aggregation SQL, filter propagation, all 11 dialects through build/manifest/reagg paths, measure type handling
 
 ## Tier 2: Docker-based integration tests
 
@@ -143,6 +144,7 @@ cargo test --features exec -- --include-ignored
 - **Postgres** (2 tests): Standard and unfiltered queries
 - **MySQL** (1 test): Standard query
 - **ClickHouse** (2 tests): Standard and unfiltered queries
+- **Pre-aggregation / ClickHouse** (7 tests): Build rollup table, manifest roundtrip, coverage check, re-aggregation (sum/count by platform, count_distinct, time dimension), rollup data correctness
 - **Presto/Trino** (9 tests): Seed, standard query, unfiltered, contribution motif, rank motif, time dimension (DATE_TRUNC), anomaly motif (STDDEV_POP), error handling, config deserialization
 
 ### Teardown
