@@ -403,7 +403,7 @@ pub fn generate_manifest_upsert_sql(
         entry.measures_json.replace('\'', "''"),
         entry.time_dimension.as_deref().unwrap_or("").replace('\'', "''"),
         entry.granularity.as_deref().unwrap_or("").replace('\'', "''"),
-        entry.build_date,
+        entry.build_date.replace('\'', "''"),
     )
 }
 

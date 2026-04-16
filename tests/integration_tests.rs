@@ -3081,6 +3081,10 @@ mod preagg_tests {
     use std::sync::Once;
 
     static PREAGG_SEED: Once = Once::new();
+    static PREAGG_BUILD: Once = Once::new();
+
+    const PREAGG_SCHEMA: &str = "airlayer_test_preagg";
+    const DATE_STR: &str = "20260415";
 
     fn ch_base_url() -> String {
         load_test_ports();
@@ -3092,14 +3096,18 @@ mod preagg_tests {
         ureq::get(&format!("{}/ping", ch_base_url())).call().is_ok()
     }
 
+    fn ch_exec(sql: &str) -> Result<String, String> {
+        let resp = ureq::post(&format!("{}/", ch_base_url()))
+            .send_string(sql)
+            .map_err(|e| format!("ClickHouse error: {}\nSQL: {}", e, sql))?;
+        resp.into_string().map_err(|e| format!("Read error: {}", e))
+    }
+
     fn seed() {
         PREAGG_SEED.call_once(|| {
-            // Reuse the ClickHouse seed (creates analytics.events)
             for table in &["events"] {
                 let drop = format!("DROP TABLE IF EXISTS analytics.{}", table);
-                ureq::post(&format!("{}/", ch_base_url()))
-                    .send_string(&drop)
-                    .ok();
+                ch_exec(&drop).ok();
             }
             let seed_sql = include_str!("integration/seed/clickhouse.sql");
             for stmt in seed_sql.split(';') {
@@ -3113,18 +3121,69 @@ mod preagg_tests {
                     && (trimmed.contains("analytics.events")
                         || trimmed.starts_with("CREATE DATABASE"))
                 {
-                    ureq::post(&format!("{}/", ch_base_url()))
-                        .send_string(trimmed)
-                        .ok();
+                    ch_exec(trimmed).ok();
                 }
             }
         });
     }
 
+    /// Shared build step: seeds data, creates the preagg schema, builds rollup + manifest.
+    /// Returns the rollup table name.
+    fn build() -> String {
+        seed();
+
+        let views_dir =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/integration/views-preagg");
+        let dialects = DatasourceDialectMap::with_default(Dialect::ClickHouse);
+        let engine = SemanticEngine::load(&views_dir, None, dialects).expect("load");
+        let view = engine.view("events").expect("events view");
+        let rollups = airlayer::engine::preagg::resolve_rollups(view);
+        let rollup = &rollups[0];
+        let table_name = format!("{}.events__{}__{}",
+            PREAGG_SCHEMA, rollup.hash, DATE_STR);
+
+        PREAGG_BUILD.call_once(|| {
+            // Create schema
+            ch_exec(&format!("CREATE DATABASE IF NOT EXISTS {}", PREAGG_SCHEMA))
+                .expect("create preagg db");
+
+            // Drop pre-existing tables
+            ch_exec(&format!("DROP TABLE IF EXISTS {}", table_name)).expect("drop rollup");
+            ch_exec(&format!("DROP TABLE IF EXISTS {}.__manifest", PREAGG_SCHEMA))
+                .expect("drop manifest");
+
+            // Build rollup table via CTAS
+            let sqls = airlayer::engine::preagg::generate_build_sql(
+                view, rollup, PREAGG_SCHEMA, DATE_STR, &Dialect::ClickHouse,
+            );
+            ch_exec(&sqls[0]).expect("CTAS failed");
+
+            // Create manifest table
+            let manifest_ddl = airlayer::engine::preagg::generate_manifest_create_sql(
+                PREAGG_SCHEMA, &Dialect::ClickHouse,
+            );
+            ch_exec(&manifest_ddl).expect("manifest DDL failed");
+
+            // Insert manifest entry
+            let entry = airlayer::engine::preagg::build_manifest_entry(
+                view, rollup, PREAGG_SCHEMA, DATE_STR,
+            );
+            let upsert = airlayer::engine::preagg::generate_manifest_upsert_sql(
+                PREAGG_SCHEMA, &entry, &Dialect::ClickHouse,
+            );
+            ch_exec(&upsert).expect("manifest upsert failed");
+        });
+
+        table_name
+    }
+
+    // -----------------------------------------------------------------------
+    // Tests that don't need ClickHouse
+    // -----------------------------------------------------------------------
+
     #[test]
     #[ignore = "tier2"]
     fn preagg_resolve_rollups() {
-        // Unit-level: verify rollups resolve correctly from the test view
         let views_dir =
             Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/integration/views-preagg");
         let dialects = DatasourceDialectMap::with_default(Dialect::ClickHouse);
@@ -3136,73 +3195,6 @@ mod preagg_tests {
         assert_eq!(rollups[0].name, "by_platform_daily");
         assert_eq!(rollups[0].dimensions, vec!["platform"]);
         assert_eq!(rollups[0].measures.len(), 3);
-    }
-
-    #[test]
-    #[ignore = "tier2"]
-    fn preagg_build_sql_generation() {
-        if !is_available() {
-            eprintln!("ClickHouse not available, skipping");
-            return;
-        }
-        seed();
-
-        let views_dir =
-            Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/integration/views-preagg");
-        let dialects = DatasourceDialectMap::with_default(Dialect::ClickHouse);
-        let engine = SemanticEngine::load(&views_dir, None, dialects).expect("load");
-
-        let view = engine.view("events").expect("events view");
-        let rollups = airlayer::engine::preagg::resolve_rollups(view);
-        let sqls = airlayer::engine::preagg::generate_build_sql(
-            view,
-            &rollups[0],
-            "airlayer_test_preagg",
-            "20260415",
-            &Dialect::ClickHouse,
-        );
-
-        assert!(!sqls.is_empty());
-        let ctas = &sqls[0];
-        assert!(ctas.contains("CREATE TABLE"), "CTAS: {}", ctas);
-        assert!(ctas.contains("airlayer_test_preagg"), "Schema: {}", ctas);
-        assert!(ctas.contains("total_events__count"), "Count col: {}", ctas);
-        assert!(ctas.contains("total_revenue__sum"), "Sum col: {}", ctas);
-        assert!(ctas.contains("user_id"), "CD col: {}", ctas);
-
-        // Execute: create schema + table
-        let create_db = "CREATE DATABASE IF NOT EXISTS airlayer_test_preagg";
-        ureq::post(&format!("{}/", ch_base_url()))
-            .send_string(create_db)
-            .expect("create db");
-
-        // Drop pre-existing table if any
-        let table_name = format!(
-            "airlayer_test_preagg.events__{}__20260415",
-            rollups[0].hash
-        );
-        let drop = format!("DROP TABLE IF EXISTS {}", table_name);
-        ureq::post(&format!("{}/", ch_base_url()))
-            .send_string(&drop)
-            .expect("drop");
-
-        // Execute CTAS
-        let resp = ureq::post(&format!("{}/", ch_base_url())).send_string(ctas);
-        assert!(resp.is_ok(), "CTAS failed: {:?}", resp.err());
-
-        // Verify data was created
-        let count_sql = format!("SELECT COUNT(*) FROM {}", table_name);
-        let count_resp = ureq::post(&format!("{}/", ch_base_url()))
-            .send_string(&count_sql)
-            .expect("count query");
-        let count_str = count_resp.into_string().expect("count response");
-        let count: i64 = count_str.trim().parse().unwrap_or(0);
-        assert!(count > 0, "Expected rows in pre-agg table, got: {}", count);
-
-        // Cleanup
-        ureq::post(&format!("{}/", ch_base_url()))
-            .send_string("DROP DATABASE IF EXISTS airlayer_test_preagg")
-            .ok();
     }
 
     #[test]
@@ -3237,6 +3229,337 @@ mod preagg_tests {
             dimensions: vec!["events.country".to_string()],
             ..QueryRequest::new()
         };
-        assert!(airlayer::engine::preagg::check_coverage(&not_covered, &[entry]).is_none());
+        assert!(airlayer::engine::preagg::check_coverage(&not_covered, &[entry.clone()]).is_none());
+
+        // Not covered — filtered query
+        let filtered = QueryRequest {
+            measures: vec!["events.total_revenue".to_string()],
+            dimensions: vec!["events.platform".to_string()],
+            filters: vec![airlayer::engine::query::QueryFilter {
+                member: Some("events.platform".to_string()),
+                operator: Some(airlayer::engine::query::FilterOperator::Equals),
+                values: vec!["web".to_string()],
+                and: None,
+                or: None,
+            }],
+            ..QueryRequest::new()
+        };
+        assert!(airlayer::engine::preagg::check_coverage(&filtered, &[entry]).is_none());
+    }
+
+    // -----------------------------------------------------------------------
+    // ClickHouse tier 2: seed → build → verify
+    // -----------------------------------------------------------------------
+
+    /// Verify the CTAS creates the rollup table with the expected row count.
+    /// Seed data has 12 events; GROUP BY (platform, day, user_id) yields 6 rows.
+    #[test]
+    #[ignore = "tier2"]
+    fn preagg_build_creates_rollup_table() {
+        if !is_available() {
+            eprintln!("ClickHouse not available, skipping");
+            return;
+        }
+        let table_name = build();
+
+        let count = ch_exec(&format!("SELECT COUNT(*) FROM {}", table_name))
+            .expect("count");
+        let n: i64 = count.trim().parse().unwrap_or(0);
+        // 6 unique (platform, day, user_id) groups in seed data
+        assert_eq!(n, 6, "Expected 6 rows in rollup, got {}", n);
+    }
+
+    /// Verify actual aggregated values in the rollup table.
+    /// Checks SUM and COUNT columns per (platform, day, user_id) group.
+    #[test]
+    #[ignore = "tier2"]
+    fn preagg_rollup_data_correctness() {
+        if !is_available() {
+            eprintln!("ClickHouse not available, skipping");
+            return;
+        }
+        let table_name = build();
+
+        // Total event count across all rows should equal 12 (original row count)
+        let total_count = ch_exec(&format!(
+            "SELECT SUM(`total_events__count`) FROM {}", table_name
+        )).expect("total count");
+        assert_eq!(
+            total_count.trim(), "12",
+            "SUM of total_events__count should be 12, got: {}", total_count.trim()
+        );
+
+        // Total revenue: SUM of all revenue_cents / 100.0
+        // 4999 + 2500 + 0 + 0 + 0 + 9999 + 0 + 1500 + 0 + 0 + 0 + 0 = 18998 → 189.98
+        let total_rev = ch_exec(&format!(
+            "SELECT SUM(`total_revenue__sum`) FROM {}", table_name
+        )).expect("total rev");
+        let rev: f64 = total_rev.trim().parse().unwrap_or(0.0);
+        assert!(
+            (rev - 189.98).abs() < 0.01,
+            "Total revenue should be ~189.98, got: {}", rev
+        );
+
+        // Verify per-platform re-aggregation: web should have 3 rollup rows
+        let web_rows = ch_exec(&format!(
+            "SELECT COUNT(*) FROM {} WHERE `platform` = 'web'", table_name
+        )).expect("web rows");
+        assert_eq!(
+            web_rows.trim(), "3",
+            "Web platform should have 3 rollup rows (3 user-day combos), got: {}", web_rows.trim()
+        );
+
+        // Web total events: u1(3) + u4(2) + u5(2) = 7
+        let web_events = ch_exec(&format!(
+            "SELECT SUM(`total_events__count`) FROM {} WHERE `platform` = 'web'",
+            table_name
+        )).expect("web events");
+        assert_eq!(
+            web_events.trim(), "7",
+            "Web total events should be 7, got: {}", web_events.trim()
+        );
+    }
+
+    /// Verify the manifest table roundtrip: create, insert, read back with FINAL.
+    #[test]
+    #[ignore = "tier2"]
+    fn preagg_manifest_roundtrip() {
+        if !is_available() {
+            eprintln!("ClickHouse not available, skipping");
+            return;
+        }
+        build();
+
+        // Read manifest with FINAL (ReplacingMergeTree dedup)
+        let manifest_sql = format!(
+            "SELECT view_name, rollup_name, rollup_hash, table_name, \
+             time_dimension, granularity FROM {}.__manifest FINAL",
+            PREAGG_SCHEMA
+        );
+        let result = ch_exec(&manifest_sql).expect("manifest query");
+        let line = result.trim();
+        assert!(!line.is_empty(), "Manifest should have at least one row");
+
+        // Tab-separated: view_name, rollup_name, rollup_hash, table_name, time_dim, gran
+        let cols: Vec<&str> = line.split('\t').collect();
+        assert_eq!(cols[0], "events", "view_name");
+        assert_eq!(cols[1], "by_platform_daily", "rollup_name");
+        assert!(cols[3].contains("events__"), "table_name should contain view prefix");
+        assert!(cols[3].contains(DATE_STR), "table_name should contain date");
+        assert_eq!(cols[4], "created_at", "time_dimension");
+        assert_eq!(cols[5], "day", "granularity");
+
+        // Verify dimensions JSON stored correctly
+        let dims_sql = format!(
+            "SELECT dimensions FROM {}.__manifest FINAL WHERE view_name = 'events'",
+            PREAGG_SCHEMA
+        );
+        let dims_result = ch_exec(&dims_sql).expect("dims query");
+        assert!(
+            dims_result.contains("platform"),
+            "Dimensions should contain 'platform', got: {}", dims_result.trim()
+        );
+    }
+
+    /// Re-aggregate from the rollup table: SUM(total_events__count) and
+    /// SUM(total_revenue__sum) grouped by platform, compared to raw data.
+    #[test]
+    #[ignore = "tier2"]
+    fn preagg_reagg_sum_count_by_platform() {
+        if !is_available() {
+            eprintln!("ClickHouse not available, skipping");
+            return;
+        }
+        let table_name = build();
+
+        // Re-aggregate from rollup table: GROUP BY platform
+        let reagg_sql = format!(
+            "SELECT `platform`, \
+             SUM(`total_events__count`) AS events, \
+             SUM(`total_revenue__sum`) AS revenue \
+             FROM {} GROUP BY `platform` ORDER BY `platform`",
+            table_name
+        );
+        let result = ch_exec(&reagg_sql).expect("reagg query");
+
+        // Also query the raw table for comparison
+        let raw_sql = "SELECT platform, \
+             COUNT(*) AS events, \
+             SUM(revenue_cents / 100.0) AS revenue \
+             FROM analytics.events GROUP BY platform ORDER BY platform";
+        let raw_result = ch_exec(raw_sql).expect("raw query");
+
+        // Parse both results (tab-separated lines)
+        let reagg_lines: Vec<&str> = result.trim().lines().collect();
+        let raw_lines: Vec<&str> = raw_result.trim().lines().collect();
+
+        assert_eq!(
+            reagg_lines.len(), raw_lines.len(),
+            "Row count mismatch: reagg={}, raw={}",
+            reagg_lines.len(), raw_lines.len()
+        );
+
+        // Compare each row
+        for (reagg_line, raw_line) in reagg_lines.iter().zip(raw_lines.iter()) {
+            let reagg_cols: Vec<&str> = reagg_line.split('\t').collect();
+            let raw_cols: Vec<&str> = raw_line.split('\t').collect();
+
+            assert_eq!(
+                reagg_cols[0], raw_cols[0],
+                "Platform mismatch: reagg={}, raw={}", reagg_cols[0], raw_cols[0]
+            );
+            assert_eq!(
+                reagg_cols[1], raw_cols[1],
+                "Event count mismatch for {}: reagg={}, raw={}",
+                reagg_cols[0], reagg_cols[1], raw_cols[1]
+            );
+
+            let reagg_rev: f64 = reagg_cols[2].parse().unwrap_or(-1.0);
+            let raw_rev: f64 = raw_cols[2].parse().unwrap_or(-2.0);
+            assert!(
+                (reagg_rev - raw_rev).abs() < 0.01,
+                "Revenue mismatch for {}: reagg={}, raw={}",
+                reagg_cols[0], reagg_rev, raw_rev
+            );
+        }
+    }
+
+    /// Re-aggregate COUNT(DISTINCT user_id) from the rollup table.
+    /// The rollup stores raw user_id in GROUP BY, so COUNT(DISTINCT) should be exact.
+    #[test]
+    #[ignore = "tier2"]
+    fn preagg_reagg_count_distinct() {
+        if !is_available() {
+            eprintln!("ClickHouse not available, skipping");
+            return;
+        }
+        let table_name = build();
+
+        // Re-aggregate count_distinct from rollup
+        let reagg_sql = format!(
+            "SELECT `platform`, COUNT(DISTINCT `user_id`) AS unique_users \
+             FROM {} GROUP BY `platform` ORDER BY `platform`",
+            table_name
+        );
+        let reagg_result = ch_exec(&reagg_sql).expect("reagg cd query");
+
+        // Raw comparison
+        let raw_sql = "SELECT platform, COUNT(DISTINCT user_id) AS unique_users \
+             FROM analytics.events GROUP BY platform ORDER BY platform";
+        let raw_result = ch_exec(raw_sql).expect("raw cd query");
+
+        let reagg_lines: Vec<&str> = reagg_result.trim().lines().collect();
+        let raw_lines: Vec<&str> = raw_result.trim().lines().collect();
+
+        assert_eq!(reagg_lines.len(), raw_lines.len());
+
+        for (reagg_line, raw_line) in reagg_lines.iter().zip(raw_lines.iter()) {
+            let reagg_cols: Vec<&str> = reagg_line.split('\t').collect();
+            let raw_cols: Vec<&str> = raw_line.split('\t').collect();
+            assert_eq!(
+                reagg_cols[0], raw_cols[0],
+                "Platform mismatch"
+            );
+            assert_eq!(
+                reagg_cols[1], raw_cols[1],
+                "Count distinct mismatch for {}: reagg={}, raw={}",
+                reagg_cols[0], reagg_cols[1], raw_cols[1]
+            );
+        }
+    }
+
+    /// Re-aggregate with time dimension: GROUP BY (platform, day).
+    /// Verifies the time truncation column is usable for re-aggregation.
+    #[test]
+    #[ignore = "tier2"]
+    fn preagg_reagg_with_time_dimension() {
+        if !is_available() {
+            eprintln!("ClickHouse not available, skipping");
+            return;
+        }
+        let table_name = build();
+
+        // Re-aggregate from rollup: GROUP BY (platform, day)
+        let reagg_sql = format!(
+            "SELECT `platform`, `created_at__day`, \
+             SUM(`total_events__count`) AS events \
+             FROM {} GROUP BY `platform`, `created_at__day` \
+             ORDER BY `platform`, `created_at__day`",
+            table_name
+        );
+        let reagg_result = ch_exec(&reagg_sql).expect("reagg time query");
+
+        // Raw comparison: GROUP BY (platform, toStartOfDay(created_at))
+        let raw_sql = "SELECT platform, toStartOfDay(created_at) AS d, \
+             COUNT(*) AS events \
+             FROM analytics.events GROUP BY platform, d \
+             ORDER BY platform, d";
+        let raw_result = ch_exec(raw_sql).expect("raw time query");
+
+        let reagg_lines: Vec<&str> = reagg_result.trim().lines().collect();
+        let raw_lines: Vec<&str> = raw_result.trim().lines().collect();
+
+        assert_eq!(
+            reagg_lines.len(), raw_lines.len(),
+            "Row count mismatch: reagg has {} rows, raw has {} rows\nReagg:\n{}\nRaw:\n{}",
+            reagg_lines.len(), raw_lines.len(), reagg_result.trim(), raw_result.trim()
+        );
+
+        // Verify event counts match row by row
+        for (reagg_line, raw_line) in reagg_lines.iter().zip(raw_lines.iter()) {
+            let reagg_cols: Vec<&str> = reagg_line.split('\t').collect();
+            let raw_cols: Vec<&str> = raw_line.split('\t').collect();
+            assert_eq!(
+                reagg_cols[0], raw_cols[0],
+                "Platform mismatch"
+            );
+            assert_eq!(
+                reagg_cols[2], raw_cols[2],
+                "Event count mismatch for {} on {}: reagg={}, raw={}",
+                reagg_cols[0], reagg_cols[1], reagg_cols[2], raw_cols[2]
+            );
+        }
+    }
+
+    /// Verify that a second build (different date) produces correct results.
+    /// Uses a separate date string to avoid racing with other tests.
+    #[test]
+    #[ignore = "tier2"]
+    fn preagg_rebuild_idempotent() {
+        if !is_available() {
+            eprintln!("ClickHouse not available, skipping");
+            return;
+        }
+        // Ensure shared build has run (creates the database)
+        build();
+
+        let rebuild_date = "20260416";
+        let views_dir =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/integration/views-preagg");
+        let dialects = DatasourceDialectMap::with_default(Dialect::ClickHouse);
+        let engine = SemanticEngine::load(&views_dir, None, dialects).expect("load");
+        let view = engine.view("events").expect("events view");
+        let rollups = airlayer::engine::preagg::resolve_rollups(view);
+
+        let rebuild_table = format!("{}.events__{}__{}",
+            PREAGG_SCHEMA, rollups[0].hash, rebuild_date);
+
+        let sqls = airlayer::engine::preagg::generate_build_sql(
+            view, &rollups[0], PREAGG_SCHEMA, rebuild_date, &Dialect::ClickHouse,
+        );
+
+        // Build, then drop and rebuild to prove idempotency
+        ch_exec(&format!("DROP TABLE IF EXISTS {}", rebuild_table)).expect("pre-drop");
+        ch_exec(&sqls[0]).expect("first build");
+        ch_exec(&format!("DROP TABLE IF EXISTS {}", rebuild_table)).expect("drop for rebuild");
+        ch_exec(&sqls[0]).expect("rebuild CTAS");
+
+        let count = ch_exec(&format!("SELECT COUNT(*) FROM {}", rebuild_table))
+            .expect("count after rebuild");
+        let n: i64 = count.trim().parse().unwrap_or(0);
+        assert_eq!(n, 6, "Rebuilt table should have 6 rows, got {}", n);
+
+        // Cleanup
+        ch_exec(&format!("DROP TABLE IF EXISTS {}", rebuild_table)).ok();
     }
 }
