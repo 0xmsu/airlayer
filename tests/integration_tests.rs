@@ -3147,16 +3147,17 @@ mod preagg_tests {
             ch_exec(&format!("CREATE DATABASE IF NOT EXISTS {}", PREAGG_SCHEMA))
                 .expect("create preagg db");
 
-            // Drop pre-existing tables
-            ch_exec(&format!("DROP TABLE IF EXISTS {}", table_name)).expect("drop rollup");
+            // Drop pre-existing manifest table
             ch_exec(&format!("DROP TABLE IF EXISTS {}.__manifest", PREAGG_SCHEMA))
                 .expect("drop manifest");
 
-            // Build rollup table via CTAS
+            // Build rollup table (DROP + CTAS)
             let sqls = airlayer::engine::preagg::generate_build_sql(
                 view, rollup, PREAGG_SCHEMA, DATE_STR, &Dialect::ClickHouse,
             );
-            ch_exec(&sqls[0]).expect("CTAS failed");
+            for sql in &sqls {
+                ch_exec(sql).expect("build SQL failed");
+            }
 
             // Create manifest table
             let manifest_ddl = airlayer::engine::preagg::generate_manifest_create_sql(
@@ -3548,11 +3549,13 @@ mod preagg_tests {
             view, &rollups[0], PREAGG_SCHEMA, rebuild_date, &Dialect::ClickHouse,
         );
 
-        // Build, then drop and rebuild to prove idempotency
-        ch_exec(&format!("DROP TABLE IF EXISTS {}", rebuild_table)).expect("pre-drop");
-        ch_exec(&sqls[0]).expect("first build");
-        ch_exec(&format!("DROP TABLE IF EXISTS {}", rebuild_table)).expect("drop for rebuild");
-        ch_exec(&sqls[0]).expect("rebuild CTAS");
+        // Build twice to prove idempotency (generate_build_sql includes DROP IF EXISTS)
+        for sql in &sqls {
+            ch_exec(sql).expect("first build");
+        }
+        for sql in &sqls {
+            ch_exec(sql).expect("rebuild");
+        }
 
         let count = ch_exec(&format!("SELECT COUNT(*) FROM {}", rebuild_table))
             .expect("count after rebuild");

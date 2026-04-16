@@ -347,7 +347,8 @@ pub fn generate_build_sql(
         }
     };
 
-    vec![ctas]
+    let drop = format!("DROP TABLE IF EXISTS {}", fq_table);
+    vec![drop, ctas]
 }
 
 /// Generate the CREATE TABLE statement for the __manifest table.
@@ -712,7 +713,12 @@ pub fn build_manifest_entry(
         measures_json,
         time_dimension: rollup.time_dimension.clone(),
         granularity: rollup.granularity.clone(),
-        build_date: date_str.to_string(),
+        // Convert YYYYMMDD to YYYY-MM-DD for SQL DATE columns
+        build_date: if date_str.len() == 8 && date_str.chars().all(|c| c.is_ascii_digit()) {
+            format!("{}-{}-{}", &date_str[..4], &date_str[4..6], &date_str[6..8])
+        } else {
+            date_str.to_string()
+        },
     }
 }
 
@@ -732,8 +738,8 @@ mod tests {
             "20260415",
             &crate::dialect::Dialect::ClickHouse,
         );
-        assert_eq!(sqls.len(), 1); // One CTAS statement
-        let ctas = &sqls[0];
+        assert_eq!(sqls.len(), 2); // DROP + CTAS
+        let ctas = &sqls[1];
         assert!(ctas.contains("CREATE TABLE"), "Missing CREATE TABLE: {}", ctas);
         assert!(ctas.contains("AIRLAYER"), "Missing schema: {}", ctas);
         assert!(ctas.contains("orders__"), "Missing view name: {}", ctas);
