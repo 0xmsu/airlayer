@@ -1506,17 +1506,9 @@ fn run_build(
     // Collect all SQL statements
     let mut all_stmts: Vec<String> = Vec::new();
 
-    // 1. Create schema/database
-    match dialect {
-        Dialect::ClickHouse => {
-            all_stmts.push(format!(
-                "CREATE DATABASE IF NOT EXISTS {}",
-                effective_schema
-            ));
-        }
-        _ => {
-            all_stmts.push(format!("CREATE SCHEMA IF NOT EXISTS {}", effective_schema));
-        }
+    // 1. Create schema/database (if the dialect supports it)
+    if let Some(ddl) = dialect.create_schema_ddl(&effective_schema) {
+        all_stmts.push(ddl);
     }
 
     // 2. Create manifest table
@@ -1635,6 +1627,22 @@ fn run_pull(
 
     #[cfg(feature = "exec")]
     {
+        // Resolve dialect for the target database
+        let dialect = if let Some(ref db_name) = effective_database {
+            let db_config = partial
+                .databases
+                .iter()
+                .find(|d| d.name == *db_name)
+                .ok_or_else(|| format!("Database '{}' not found in config", db_name))?;
+            Dialect::from_str(&db_config.db_type)
+                .ok_or_else(|| format!("Unknown dialect: {}", db_config.db_type))?
+        } else if let Some(first) = partial.databases.first() {
+            Dialect::from_str(&first.db_type)
+                .ok_or_else(|| format!("Unknown dialect: {}", first.db_type))?
+        } else {
+            return Err("No databases configured in config.yml".into());
+        };
+
         let exec_config: crate::executor::ExecutionConfig =
             serde_yaml::from_str(&content).map_err(|e| format!("Failed to parse config: {}", e))?;
         let connection = if let Some(ref db_name) = effective_database {
@@ -1643,19 +1651,17 @@ fn run_pull(
             exec_config.first_connection()?
         };
 
-        // 1. Read manifest from warehouse (FINAL is ClickHouse-specific for ReplacingMergeTree)
+        // 1. Read manifest from warehouse
+        let manifest_table = dialect.qualify_table(&effective_schema, "__manifest");
+        let final_clause = if dialect == Dialect::ClickHouse {
+            " FINAL"
+        } else {
+            ""
+        };
         let manifest_sql = format!(
             "SELECT view_name, rollup_name, rollup_hash, table_name, dimensions, measures, \
              time_dimension, granularity, build_date \
-             FROM {}.{}{}",
-            effective_schema,
-            "__manifest",
-            // ClickHouse needs FINAL to deduplicate ReplacingMergeTree rows
-            if partial.databases.first().map(|d| d.db_type.as_str()) == Some("clickhouse") {
-                " FINAL"
-            } else {
-                ""
-            }
+             FROM {manifest_table}{final_clause}",
         );
         let manifest_result = crate::executor::execute(&connection, &manifest_sql, &[])
             .map_err(|e| format!("Failed to read manifest: {}", e))?;
@@ -1714,8 +1720,12 @@ fn run_pull(
                 view_name, rollup_name, parquet_filename
             );
 
-            // SELECT all data from the pre-agg table
-            let select_sql = format!("SELECT * FROM {}", table_name);
+            // SELECT all data from the pre-agg table (re-quote the stored name)
+            let select_sql = if let Some((s, t)) = table_name.split_once('.') {
+                format!("SELECT * FROM {}", dialect.qualify_table(s, t))
+            } else {
+                format!("SELECT * FROM {}", dialect.quote_identifier(table_name))
+            };
             let data = crate::executor::execute(&connection, &select_sql, &[])
                 .map_err(|e| format!("Failed to pull {}: {}", table_name, e))?;
 

@@ -218,7 +218,7 @@ pub fn generate_build_sql(
     dialect: &Dialect,
 ) -> Vec<String> {
     let table_name = format!("{}__{}__{}", view.name, rollup.hash, date_str);
-    let fq_table = format!("{}.{}", schema, table_name);
+    let fq_table = dialect.qualify_table(schema, &table_name);
 
     // Determine which raw expr columns need to be in GROUP BY (for count_distinct, median)
     let mut extra_group_cols: Vec<String> = Vec::new();
@@ -351,7 +351,7 @@ pub fn generate_build_sql(
 
 /// Generate the CREATE TABLE statement for the __manifest table.
 pub fn generate_manifest_create_sql(schema: &str, dialect: &Dialect) -> String {
-    let fq_table = format!("{}.__manifest", schema);
+    let fq_table = dialect.qualify_table(schema, "__manifest");
     match dialect {
         Dialect::ClickHouse => format!(
             "CREATE TABLE IF NOT EXISTS {fq_table} (\n\
@@ -366,6 +366,35 @@ pub fn generate_manifest_create_sql(schema: &str, dialect: &Dialect) -> String {
              \x20   build_date Date\n\
              ) ENGINE = ReplacingMergeTree(build_date)\n\
              ORDER BY (view_name, rollup_name)"
+        ),
+        // BigQuery uses STRING, not VARCHAR
+        Dialect::BigQuery => format!(
+            "CREATE TABLE IF NOT EXISTS {fq_table} (\n\
+             \x20   view_name STRING,\n\
+             \x20   rollup_name STRING,\n\
+             \x20   rollup_hash STRING,\n\
+             \x20   table_name STRING,\n\
+             \x20   dimensions STRING,\n\
+             \x20   measures STRING,\n\
+             \x20   time_dimension STRING,\n\
+             \x20   granularity STRING,\n\
+             \x20   build_date DATE\n\
+             )"
+        ),
+        // SQLite doesn't support composite PRIMARY KEY in column defs
+        Dialect::SQLite => format!(
+            "CREATE TABLE IF NOT EXISTS {fq_table} (\n\
+             \x20   view_name TEXT,\n\
+             \x20   rollup_name TEXT,\n\
+             \x20   rollup_hash TEXT,\n\
+             \x20   table_name TEXT,\n\
+             \x20   dimensions TEXT,\n\
+             \x20   measures TEXT,\n\
+             \x20   time_dimension TEXT,\n\
+             \x20   granularity TEXT,\n\
+             \x20   build_date TEXT,\n\
+             \x20   UNIQUE (view_name, rollup_name)\n\
+             )"
         ),
         _ => format!(
             "CREATE TABLE IF NOT EXISTS {fq_table} (\n\
@@ -386,34 +415,56 @@ pub fn generate_manifest_create_sql(schema: &str, dialect: &Dialect) -> String {
 
 /// Generate upsert SQL for a manifest entry.
 /// ClickHouse uses INSERT (ReplacingMergeTree handles dedup).
+/// SQLite uses INSERT OR REPLACE (UNIQUE constraint handles dedup).
 /// Other dialects use DELETE + INSERT to handle re-builds.
 pub fn generate_manifest_upsert_sql(
     schema: &str,
     entry: &ManifestEntry,
     dialect: &Dialect,
 ) -> Vec<String> {
-    let fq_table = format!("{}.__manifest", schema);
-    let insert = format!(
-        "INSERT INTO {fq_table} (view_name, rollup_name, rollup_hash, table_name, dimensions, measures, time_dimension, granularity, build_date) VALUES (\
-         '{}', '{}', '{}', '{}', '{}', '{}', '{}', '{}', '{}')",
+    let fq_table = dialect.qualify_table(schema, "__manifest");
+    let values = format!(
+        "('{}', '{}', '{}', '{}', '{}', '{}', '{}', '{}', '{}')",
         entry.view_name.replace('\'', "''"),
         entry.rollup_name.replace('\'', "''"),
         entry.rollup_hash.replace('\'', "''"),
         entry.table_name.replace('\'', "''"),
-        serde_json::to_string(&entry.dimensions).unwrap_or_default().replace('\'', "''"),
+        serde_json::to_string(&entry.dimensions)
+            .unwrap_or_default()
+            .replace('\'', "''"),
         entry.measures_json.replace('\'', "''"),
-        entry.time_dimension.as_deref().unwrap_or("").replace('\'', "''"),
-        entry.granularity.as_deref().unwrap_or("").replace('\'', "''"),
+        entry
+            .time_dimension
+            .as_deref()
+            .unwrap_or("")
+            .replace('\'', "''"),
+        entry
+            .granularity
+            .as_deref()
+            .unwrap_or("")
+            .replace('\'', "''"),
         entry.build_date.replace('\'', "''"),
     );
+    let columns = "(view_name, rollup_name, rollup_hash, table_name, dimensions, measures, time_dimension, granularity, build_date)";
     match dialect {
-        Dialect::ClickHouse => vec![insert],
+        // ClickHouse: ReplacingMergeTree handles dedup, just INSERT
+        Dialect::ClickHouse => {
+            vec![format!("INSERT INTO {fq_table} {columns} VALUES {values}")]
+        }
+        // SQLite: use INSERT OR REPLACE (relies on UNIQUE constraint)
+        Dialect::SQLite => {
+            vec![format!(
+                "INSERT OR REPLACE INTO {fq_table} {columns} VALUES {values}"
+            )]
+        }
+        // All others: DELETE + INSERT
         _ => {
             let delete = format!(
                 "DELETE FROM {fq_table} WHERE view_name = '{}' AND rollup_name = '{}'",
                 entry.view_name.replace('\'', "''"),
                 entry.rollup_name.replace('\'', "''"),
             );
+            let insert = format!("INSERT INTO {fq_table} {columns} VALUES {values}");
             vec![delete, insert]
         }
     }
@@ -765,17 +816,99 @@ mod tests {
     }
 
     #[test]
-    fn test_generate_manifest_sql() {
+    fn test_generate_manifest_sql_clickhouse() {
         let create = generate_manifest_create_sql("AIRLAYER", &crate::dialect::Dialect::ClickHouse);
         assert!(
             create.contains("__manifest"),
-            "Missing manifest table name: {}",
+            "Missing manifest: {}",
             create
         );
         assert!(
-            create.contains("CREATE TABLE"),
-            "Missing CREATE TABLE: {}",
+            create.contains("ReplacingMergeTree"),
+            "Missing engine: {}",
             create
+        );
+    }
+
+    #[test]
+    fn test_generate_manifest_sql_postgres() {
+        let create = generate_manifest_create_sql("preagg", &crate::dialect::Dialect::Postgres);
+        assert!(
+            create.contains("\"preagg\".\"__manifest\""),
+            "Missing quoted name: {}",
+            create
+        );
+        assert!(create.contains("PRIMARY KEY"), "Missing PK: {}", create);
+    }
+
+    #[test]
+    fn test_generate_manifest_sql_bigquery() {
+        let create = generate_manifest_create_sql("my_dataset", &crate::dialect::Dialect::BigQuery);
+        assert!(
+            create.contains("`my_dataset`.`__manifest`"),
+            "Missing backtick-quoted name: {}",
+            create
+        );
+        assert!(create.contains("STRING"), "Missing STRING type: {}", create);
+        assert!(
+            !create.contains("PRIMARY KEY"),
+            "BigQuery should not have PK: {}",
+            create
+        );
+    }
+
+    #[test]
+    fn test_generate_manifest_sql_sqlite() {
+        let create = generate_manifest_create_sql("preagg", &crate::dialect::Dialect::SQLite);
+        assert!(create.contains("TEXT"), "Missing TEXT type: {}", create);
+        assert!(create.contains("UNIQUE"), "Missing UNIQUE: {}", create);
+        assert!(
+            !create.contains("PRIMARY KEY"),
+            "SQLite should use UNIQUE not PK: {}",
+            create
+        );
+    }
+
+    #[test]
+    fn test_build_sql_uses_dialect_quoting() {
+        let view = test_view_with_preaggs();
+        let rollups = resolve_rollups(&view);
+        // BigQuery should use backtick quoting
+        let sqls = generate_build_sql(
+            &view,
+            &rollups[0],
+            "my_dataset",
+            "20260415",
+            &crate::dialect::Dialect::BigQuery,
+        );
+        let ctas = &sqls[1];
+        assert!(
+            ctas.contains("`my_dataset`"),
+            "Missing backtick-quoted schema: {}",
+            ctas
+        );
+    }
+
+    #[test]
+    fn test_manifest_upsert_sqlite_uses_replace() {
+        let entry = ManifestEntry {
+            view_name: "orders".into(),
+            rollup_name: "by_region".into(),
+            rollup_hash: "a1b2c3d4".into(),
+            table_name: "preagg.orders__a1b2c3d4__20260415".into(),
+            dimensions: vec!["region".into()],
+            measures_json: "[]".into(),
+            time_dimension: None,
+            granularity: None,
+            build_date: "2026-04-15".into(),
+        };
+        let stmts =
+            generate_manifest_upsert_sql("preagg", &entry, &crate::dialect::Dialect::SQLite);
+        assert_eq!(stmts.len(), 1, "SQLite should use INSERT OR REPLACE");
+        assert!(
+            stmts[0].contains("INSERT OR REPLACE"),
+            "Missing INSERT OR REPLACE: {}",
+            stmts[0]
         );
     }
 
