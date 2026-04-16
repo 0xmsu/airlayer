@@ -15,6 +15,7 @@ pub mod wasm;
 pub mod python;
 
 pub use dialect::Dialect;
+pub use engine::preagg;
 pub use engine::{DatabaseConfig, DatasourceDialectMap, PartialConfig, SemanticEngine};
 pub use schema::models::{
     Dimension, Entity, Measure, Motif, MotifKind, MotifOutputColumn, MotifParam, SavedQuery,

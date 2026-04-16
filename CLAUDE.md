@@ -134,6 +134,8 @@ exec            = all of the above
 - **SQL param escaping**: All `inline_params` functions escape `'` as `''` (SQL standard doubled-quote). Never use `\'` (non-standard backslash).
 - **Motif CTE wrapping**: Motifs compile the base query as `WITH __base AS (...)`, then add window-function columns in the outer SELECT. Complex motifs (anomaly, trend) use multi-stage CTEs (`__base → __stage1 → final`). Params of type `measure`/`dimension` auto-bind only when unambiguous (exactly one column of that kind); with multiple measures, the user must pass explicit `motif_params` using semantic member names. In multi-stage CTEs, final-stage expressions reference the `s.` alias (stage), not `b.` (base).
 - **Saved queries are referenced by filepath**: Saved queries are defined as `.query.yml` files in the `queries/` directory. They support both single-step (inline query fields) and multi-step (with `steps`) formats. Saved queries are referenced by their file path (e.g., `airlayer query queries/revenue.query.yml`), not by a global name. The `name` field is a display label only. Saved queries are parsed and validated at load time; each step can be compiled to SQL independently.
+- **Pre-aggregation three-tier resolution**: When `--execute` is used, queries check (1) local Parquet cache via DuckDB, (2) warehouse `__manifest` pre-agg tables, (3) raw SQL, in that order. `--no-cache` skips layers 1 and 2.
+- **Rollup column strategy**: SUM/COUNT/MIN/MAX store aggregated columns. AVG stores SUM+COUNT for recomputation. COUNT_DISTINCT stores raw expr column (GROUP BY it). MEDIAN stores raw expr + freq column. Custom measures are not pre-aggregable.
 
 ## Motifs
 
@@ -258,6 +260,9 @@ steps:
 - `inspect --json`: machine-readable output for agent consumption
 - `query <file>`: compile a saved query file (all steps to SQL), e.g. `airlayer query queries/revenue.query.yml`
 - `query <file> -x`: execute a saved query file against the database
+- `build`: pre-aggregate views into warehouse rollup tables. `--schema` (default AIRLAYER), `--database`, `--view`, `--dry-run`.
+- `pull`: download pre-aggregated data to local `.airlayer/cache/` as Parquet files. `--schema`, `--database`, `--view`.
+- `query --no-cache`: bypass pre-aggregation cache layers, execute raw SQL directly.
 
 ## Reference material
 
