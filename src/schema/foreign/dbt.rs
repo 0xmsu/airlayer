@@ -11,8 +11,10 @@
 //! - Measure filters (where clauses)
 //! - model: ref('model_name') references
 
-use super::{ConversionResult, parse_foreign_dimension_type, parse_foreign_measure_type,
-            rewrite_dbt_jinja, RE_DBT_REF, RE_DBT_SOURCE};
+use super::{
+    parse_foreign_dimension_type, parse_foreign_measure_type, rewrite_dbt_jinja, ConversionResult,
+    RE_DBT_REF, RE_DBT_SOURCE,
+};
 use crate::schema::models::*;
 use serde::Deserialize;
 
@@ -182,7 +184,11 @@ struct DbtMetricTypeParams {
 #[serde(untagged)]
 enum DbtMetricMeasureRef {
     Name(String),
-    Object { name: String, #[serde(default)] filter: Option<String> },
+    Object {
+        name: String,
+        #[serde(default)]
+        filter: Option<String>,
+    },
 }
 
 impl DbtMetricMeasureRef {
@@ -364,8 +370,9 @@ fn convert_dbt_dimension(
     if dimension_type == DimensionType::Datetime {
         if let Some(ref tp) = d.type_params {
             match tp.time_granularity.as_deref() {
-                Some("day") | Some("week") | Some("month") | Some("quarter")
-                | Some("year") => dimension_type = DimensionType::Date,
+                Some("day") | Some("week") | Some("month") | Some("quarter") | Some("year") => {
+                    dimension_type = DimensionType::Date
+                }
                 _ => {}
             }
         }
@@ -388,11 +395,7 @@ fn convert_dbt_dimension(
     }
 }
 
-fn convert_dbt_measure(
-    m: &DbtMeasure,
-    _model_name: &str,
-    _warnings: &mut Vec<String>,
-) -> Measure {
+fn convert_dbt_measure(m: &DbtMeasure, _model_name: &str, _warnings: &mut Vec<String>) -> Measure {
     let measure_type = parse_foreign_measure_type(m.agg.as_deref().unwrap_or("count"));
 
     let expr = m.expr.clone();
@@ -454,11 +457,8 @@ fn apply_metric(views: &mut [View], metric: &DbtMetric, warnings: &mut Vec<Strin
             if let Some(ref tp) = metric.type_params {
                 if let (Some(num), Some(den)) = (&tp.numerator, &tp.denominator) {
                     // Create a derived Number measure
-                    let expr = format!(
-                        "CAST({} AS DOUBLE) / NULLIF({}, 0)",
-                        num.name(),
-                        den.name()
-                    );
+                    let expr =
+                        format!("CAST({} AS DOUBLE) / NULLIF({}, 0)", num.name(), den.name());
                     let measure = Measure {
                         name: metric.name.clone(),
                         measure_type: MeasureType::Number,
@@ -475,7 +475,10 @@ fn apply_metric(views: &mut [View], metric: &DbtMetric, warnings: &mut Vec<Strin
                     // Add to the first view that has either the numerator or denominator
                     for view in views.iter_mut() {
                         if let Some(ref measures) = view.measures {
-                            if measures.iter().any(|m| m.name == num.name() || m.name == den.name()) {
+                            if measures
+                                .iter()
+                                .any(|m| m.name == num.name() || m.name == den.name())
+                            {
                                 if let Some(ref mut ms) = view.measures {
                                     ms.push(measure);
                                 }
@@ -513,7 +516,10 @@ fn apply_metric(views: &mut [View], metric: &DbtMetric, warnings: &mut Vec<Strin
                                     samples: None,
                                     synonyms: None,
                                     rolling_window: Some(RollingWindow {
-                                        trailing: tp.window.clone().or(Some("unbounded".to_string())),
+                                        trailing: tp
+                                            .window
+                                            .clone()
+                                            .or(Some("unbounded".to_string())),
                                         leading: None,
                                         offset: None,
                                     }),
@@ -789,7 +795,9 @@ semantic_models:
             "status = 'completed'"
         );
         assert_eq!(
-            rewrite_dbt_jinja("{{ TimeDimension('order_id__ordered_at', 'month') }} > '2024-01-01'"),
+            rewrite_dbt_jinja(
+                "{{ TimeDimension('order_id__ordered_at', 'month') }} > '2024-01-01'"
+            ),
             "ordered_at > '2024-01-01'"
         );
     }

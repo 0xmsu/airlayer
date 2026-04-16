@@ -9,9 +9,10 @@
 //!
 //! Omni's schema format closely mirrors LookML concepts but uses a cleaner YAML syntax.
 
-use super::{ConversionResult, parse_foreign_dimension_type, parse_foreign_measure_type,
-            relationship_to_entity_type, rewrite_dollar_refs, extract_dollar_join_key,
-            expand_dimension_group};
+use super::{
+    expand_dimension_group, extract_dollar_join_key, parse_foreign_dimension_type,
+    parse_foreign_measure_type, relationship_to_entity_type, rewrite_dollar_refs, ConversionResult,
+};
 use crate::schema::models::*;
 use serde::Deserialize;
 use std::collections::HashMap;
@@ -284,20 +285,34 @@ fn convert_omni_dimension_group(
     let rewritten = rewrite_dollar_refs(sql_expr, view_name);
 
     if group_type == "time" {
-        let tf_strs: Vec<&str> = group.timeframes.as_ref()
+        let tf_strs: Vec<&str> = group
+            .timeframes
+            .as_ref()
             .map(|v| v.iter().map(|s| s.as_str()).collect())
             .unwrap_or_default();
         expand_dimension_group(
-            name, "time", &rewritten, group.sql.as_deref(),
-            group.description.as_deref(), &tf_strs, &[],
+            name,
+            "time",
+            &rewritten,
+            group.sql.as_deref(),
+            group.description.as_deref(),
+            &tf_strs,
+            &[],
         )
     } else if group_type == "duration" {
-        let iv_strs: Vec<&str> = group.intervals.as_ref()
+        let iv_strs: Vec<&str> = group
+            .intervals
+            .as_ref()
             .map(|v| v.iter().map(|s| s.as_str()).collect())
             .unwrap_or_default();
         expand_dimension_group(
-            name, "duration", &rewritten, group.sql.as_deref(),
-            group.description.as_deref(), &[], &iv_strs,
+            name,
+            "duration",
+            &rewritten,
+            group.sql.as_deref(),
+            group.description.as_deref(),
+            &[],
+            &iv_strs,
         )
     } else {
         vec![]
@@ -350,7 +365,10 @@ fn convert_omni_measure(
     Some(Measure {
         name: name.to_string(),
         measure_type,
-        description: measure.description.clone().or_else(|| measure.label.clone()),
+        description: measure
+            .description
+            .clone()
+            .or_else(|| measure.label.clone()),
         expr,
         original_expr: measure.sql.clone(),
         filters,
@@ -383,9 +401,8 @@ fn apply_topic_joins(
     let base_view_name = topic.base_view.as_deref().unwrap_or("");
 
     for (join_name, join) in &topic.joins {
-        let entity_type = relationship_to_entity_type(
-            join.relationship.as_deref().unwrap_or("many_to_one"),
-        );
+        let entity_type =
+            relationship_to_entity_type(join.relationship.as_deref().unwrap_or("many_to_one"));
 
         let fk = join
             .sql_on
@@ -559,10 +576,7 @@ views:
     fn test_rewrite_dollar_refs() {
         assert_eq!(rewrite_dollar_refs("${TABLE}.id", "orders"), "id");
         assert_eq!(rewrite_dollar_refs("${orders.id}", "orders"), "id");
-        assert_eq!(
-            rewrite_dollar_refs("${users.id}", "orders"),
-            "{{users.id}}"
-        );
+        assert_eq!(rewrite_dollar_refs("${users.id}", "orders"), "{{users.id}}");
     }
 
     #[test]

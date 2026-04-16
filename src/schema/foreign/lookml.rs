@@ -10,8 +10,10 @@
 //! - Measure filters via filters parameter
 //! - Primary key detection
 
-use super::{ConversionResult, parse_foreign_dimension_type, parse_foreign_measure_type,
-            relationship_to_entity_type, rewrite_dollar_refs, extract_dollar_join_key};
+use super::{
+    extract_dollar_join_key, parse_foreign_dimension_type, parse_foreign_measure_type,
+    relationship_to_entity_type, rewrite_dollar_refs, ConversionResult,
+};
 use crate::schema::models::*;
 
 // ── LookML parser ────────────────────────────────────────────────────
@@ -120,10 +122,7 @@ fn read_identifier(chars: &[char], pos: &mut usize) -> String {
 ///   `key: [a, b, c]`         — list
 ///   `key: { ... }`           — anonymous block
 ///   `key: name { ... }`      — named block (dimension, measure, join, etc.)
-fn parse_block_body(
-    chars: &[char],
-    pos: &mut usize,
-) -> Result<Vec<(String, LkmlValue)>, String> {
+fn parse_block_body(chars: &[char], pos: &mut usize) -> Result<Vec<(String, LkmlValue)>, String> {
     let mut fields = Vec::new();
 
     loop {
@@ -177,10 +176,7 @@ fn parse_block_body(
                     let mut sub_fields = parse_block_body(chars, pos)?;
                     // Insert the block name as a "name" field
                     if !block_name.is_empty() {
-                        sub_fields.insert(
-                            0,
-                            ("name".to_string(), LkmlValue::Scalar(block_name)),
-                        );
+                        sub_fields.insert(0, ("name".to_string(), LkmlValue::Scalar(block_name)));
                     }
                     fields.push((name, LkmlValue::Block(sub_fields)));
                 } else {
@@ -333,11 +329,7 @@ pub fn convert(content: &str, source: &str) -> Result<ConversionResult, String> 
     Ok(ConversionResult { views, warnings })
 }
 
-fn convert_view(
-    name: &str,
-    fields: &[(String, LkmlValue)],
-    warnings: &mut Vec<String>,
-) -> View {
+fn convert_view(name: &str, fields: &[(String, LkmlValue)], warnings: &mut Vec<String>) -> View {
     let mut table = None;
     let mut sql = None;
     let mut dimensions = Vec::new();
@@ -648,7 +640,8 @@ fn convert_lookml_measure(
                         }
                     }
                     if !field.is_empty() {
-                        let filter_expr = format!("{} = '{}'", rewrite_dollar_refs(&field, view_name), val);
+                        let filter_expr =
+                            format!("{} = '{}'", rewrite_dollar_refs(&field, view_name), val);
                         filters.push(MeasureFilter {
                             expr: filter_expr,
                             original_expr: None,
@@ -839,12 +832,20 @@ view: orders {
 
         // Check that dimension_group was parsed
         let dim_group = fields.iter().find(|(k, _)| k == "dimension_group");
-        assert!(dim_group.is_some(), "Should have dimension_group field. Fields: {:?}", fields.iter().map(|(k, _)| k).collect::<Vec<_>>());
+        assert!(
+            dim_group.is_some(),
+            "Should have dimension_group field. Fields: {:?}",
+            fields.iter().map(|(k, _)| k).collect::<Vec<_>>()
+        );
 
         if let Some((_, LkmlValue::Block(df))) = dim_group {
             // Check name was inserted
             let name_field = df.iter().find(|(k, _)| k == "name");
-            assert!(name_field.is_some(), "Should have name field. Block fields: {:?}", df.iter().map(|(k, _)| k).collect::<Vec<_>>());
+            assert!(
+                name_field.is_some(),
+                "Should have name field. Block fields: {:?}",
+                df.iter().map(|(k, _)| k).collect::<Vec<_>>()
+            );
 
             // Check timeframes list
             let tf_field = df.iter().find(|(k, _)| k == "timeframes");
@@ -859,18 +860,11 @@ view: orders {
         }
     }
 
-
     #[test]
     fn test_rewrite_dollar_refs() {
         assert_eq!(rewrite_dollar_refs("${TABLE}.id", "orders"), "id");
-        assert_eq!(
-            rewrite_dollar_refs("${orders.id}", "orders"),
-            "id"
-        );
-        assert_eq!(
-            rewrite_dollar_refs("${users.id}", "orders"),
-            "{{users.id}}"
-        );
+        assert_eq!(rewrite_dollar_refs("${orders.id}", "orders"), "id");
+        assert_eq!(rewrite_dollar_refs("${users.id}", "orders"), "{{users.id}}");
     }
 
     #[test]

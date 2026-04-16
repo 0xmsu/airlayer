@@ -12,8 +12,10 @@
 //! - Sub-query dimensions
 //! - {CUBE} / {TABLE} reference rewriting
 
-use super::{ConversionResult, parse_foreign_measure_type, relationship_to_entity_type,
-            rewrite_cube_refs, extract_cube_join_key};
+use super::{
+    extract_cube_join_key, parse_foreign_measure_type, relationship_to_entity_type,
+    rewrite_cube_refs, ConversionResult,
+};
 use crate::schema::models::*;
 use serde::Deserialize;
 use std::collections::HashMap;
@@ -154,9 +156,7 @@ pub fn convert(content: &str, source: &str) -> Result<ConversionResult, String> 
         _ => {
             // Try parsing as a single cube
             match serde_yaml::from_str::<CubeDef>(content) {
-                Ok(cube) => CubeFile {
-                    cubes: vec![cube],
-                },
+                Ok(cube) => CubeFile { cubes: vec![cube] },
                 Err(e) => {
                     return Err(format!(
                         "Failed to parse Cube.js schema from {}: {}",
@@ -285,10 +285,7 @@ fn convert_cube(
         (Some(cube_name.clone()), None)
     };
 
-    let description = cube
-        .description
-        .clone()
-        .or_else(|| cube.title.clone());
+    let description = cube.description.clone().or_else(|| cube.title.clone());
 
     View {
         name: cube_name.clone(),
@@ -310,11 +307,7 @@ fn convert_cube(
     }
 }
 
-fn convert_dimension(
-    d: &CubeDimension,
-    cube_name: &str,
-    _warnings: &mut Vec<String>,
-) -> Dimension {
+fn convert_dimension(d: &CubeDimension, cube_name: &str, _warnings: &mut Vec<String>) -> Dimension {
     let dimension_type = super::parse_foreign_dimension_type(&d.dim_type);
 
     let expr = d
@@ -342,10 +335,7 @@ fn convert_measure(m: &CubeMeasure, cube_name: &str, _warnings: &mut Vec<String>
     let measure_type = parse_foreign_measure_type(&m.measure_type);
     let type_lower = m.measure_type.to_lowercase();
 
-    let expr = m
-        .sql
-        .as_ref()
-        .map(|s| rewrite_cube_refs(s, cube_name));
+    let expr = m.sql.as_ref().map(|s| rewrite_cube_refs(s, cube_name));
 
     let filters = if m.filters.is_empty() {
         None
@@ -414,9 +404,18 @@ mod tests {
 
     #[test]
     fn test_rewrite_cube_refs_self() {
-        assert_eq!(super::rewrite_cube_refs("{CUBE}.user_id", "orders"), "user_id");
-        assert_eq!(super::rewrite_cube_refs("{TABLE}.user_id", "orders"), "user_id");
-        assert_eq!(super::rewrite_cube_refs("{orders}.user_id", "orders"), "user_id");
+        assert_eq!(
+            super::rewrite_cube_refs("{CUBE}.user_id", "orders"),
+            "user_id"
+        );
+        assert_eq!(
+            super::rewrite_cube_refs("{TABLE}.user_id", "orders"),
+            "user_id"
+        );
+        assert_eq!(
+            super::rewrite_cube_refs("{orders}.user_id", "orders"),
+            "user_id"
+        );
     }
 
     #[test]

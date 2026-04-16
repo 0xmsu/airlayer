@@ -80,7 +80,11 @@ pub struct ConversionResult {
 /// * `format` - The source format
 /// * `content` - The raw file content (YAML, LookML, etc.)
 /// * `source` - Source file path (for error messages)
-pub fn convert(format: ForeignFormat, content: &str, source: &str) -> Result<ConversionResult, String> {
+pub fn convert(
+    format: ForeignFormat,
+    content: &str,
+    source: &str,
+) -> Result<ConversionResult, String> {
     match format {
         ForeignFormat::Cube => cube::convert(content, source),
         ForeignFormat::LookML => lookml::convert(content, source),
@@ -261,12 +265,10 @@ pub(crate) fn relationship_to_entity_type(rel: &str) -> EntityType {
 // ── Shared regex patterns (compiled once) ────────────────────────────
 
 /// `${TABLE}.col` / `${view.field}` / `${field}` — used by LookML and Omni.
-static RE_DOLLAR_TABLE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"\$\{TABLE\}\.").unwrap());
+static RE_DOLLAR_TABLE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\$\{TABLE\}\.").unwrap());
 static RE_DOLLAR_VIEW_FIELD: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"\$\{(\w+)\.(\w+)\}").unwrap());
-static RE_DOLLAR_FIELD: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"\$\{(\w+)\}").unwrap());
+static RE_DOLLAR_FIELD: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\$\{(\w+)\}").unwrap());
 
 /// Rewrite `${TABLE}.col` / `${view.field}` references (LookML & Omni syntax).
 pub(crate) fn rewrite_dollar_refs(sql: &str, self_view: &str) -> String {
@@ -302,8 +304,7 @@ pub(crate) fn extract_dollar_join_key(sql_on: &str, base_view: &str) -> Option<S
 }
 
 /// `{CUBE}.col` / `{view.col}` — used by Cube.js.
-static RE_CUBE_REF: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"\{(\w+)\}\.(\w+)").unwrap());
+static RE_CUBE_REF: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\{(\w+)\}\.(\w+)").unwrap());
 
 /// Rewrite `{CUBE}.col` / `{view.col}` references (Cube.js syntax).
 pub(crate) fn rewrite_cube_refs(sql: &str, self_cube: &str) -> String {

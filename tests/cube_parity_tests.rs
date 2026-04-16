@@ -92,7 +92,10 @@ fn cube_parity_count_and_sum_by_status() {
     let mut client = match try_connect_pg() {
         Some(c) => c,
         None => {
-            eprintln!("Skipping cube parity test: Postgres not reachable on port {}", cube_pg_port());
+            eprintln!(
+                "Skipping cube parity test: Postgres not reachable on port {}",
+                cube_pg_port()
+            );
             return;
         }
     };
@@ -135,11 +138,7 @@ fn cube_parity_count_and_sum_by_status() {
 
     // Verify each row matches (status + count + sum)
     for (i, (actual, expected)) in airlayer_rows.iter().zip(expected_rows.iter()).enumerate() {
-        assert_eq!(
-            actual[0], expected[0],
-            "Status mismatch at row {}",
-            i
-        );
+        assert_eq!(actual[0], expected[0], "Status mismatch at row {}", i);
     }
 }
 
@@ -163,10 +162,7 @@ fn cube_parity_count_distinct() {
     let result = engine.compile_query(&request).unwrap();
     let airlayer_rows = execute_sql(&mut client, &result.sql);
 
-    let expected_rows = execute_sql(
-        &mut client,
-        "SELECT COUNT(DISTINCT user_id) FROM orders",
-    );
+    let expected_rows = execute_sql(&mut client, "SELECT COUNT(DISTINCT user_id) FROM orders");
 
     assert_eq!(
         airlayer_rows[0][0], expected_rows[0][0],
@@ -237,11 +233,7 @@ fn cube_parity_agg_functions() {
     );
 
     // Compare values (allow small floating point differences)
-    assert_eq!(
-        airlayer_rows.len(),
-        1,
-        "Should have exactly one row"
-    );
+    assert_eq!(airlayer_rows.len(), 1, "Should have exactly one row");
     assert_eq!(
         expected_rows.len(),
         1,
