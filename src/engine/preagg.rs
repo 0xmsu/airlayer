@@ -3253,17 +3253,8 @@ mod tests {
             Some(&old_entries),
         );
 
-        // No cleanup DROP — the old table IS the new table
-        let drops: Vec<&String> = plan
-            .statements
-            .iter()
-            .filter(|s| {
-                s.starts_with("DROP TABLE IF EXISTS")
-                    && !s.contains(&entry.table_name.replace("preagg.", ""))
-                    || false
-            })
-            .collect();
-        // The only DROP should be the one before CTAS (same table), no extra cleanup
+        // No cleanup DROP — the old table IS the new table.
+        // The last statement should be the manifest upsert, not a cleanup DROP.
         assert!(
             !plan
                 .statements
