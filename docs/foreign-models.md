@@ -68,6 +68,98 @@ airlayer convert --format cube ./cube_schema/ --stdout
 airlayer convert --format lookml ./models/ --output ./views/ --dialect bigquery
 ```
 
+## Feature Parity
+
+The table below summarizes which features each parser supports. All four formats support native loading (query directly, no conversion step) and directory-level aggregation across multiple files.
+
+### Dimensions
+
+| Feature | Cube.js | LookML | dbt | Omni |
+|---------|:-------:|:------:|:---:|:----:|
+| string | Y | Y | Y | Y |
+| number | Y | Y | Y | Y |
+| boolean | Y | Y (yesno) | Y | Y (yesno) |
+| date / datetime | Y | Y | Y | Y |
+| geo | Y | — | — | — |
+| tier / zipcode / location | — | Y | — | — |
+| Primary key | Y | Y | Y (entity) | Y |
+| Labels / descriptions | Y | Y | Y | Y |
+| Hidden fields | — | — | — | — |
+
+### Dimension Groups
+
+| Feature | Cube.js | LookML | dbt | Omni |
+|---------|:-------:|:------:|:---:|:----:|
+| Time groups (→ multiple dims) | — | Y | — | Y |
+| Duration groups (intervals) | — | Y | — | Y |
+| Custom timeframes | — | Y | — | Y |
+
+### Measures
+
+| Feature | Cube.js | LookML | dbt | Omni |
+|---------|:-------:|:------:|:---:|:----:|
+| count | Y | Y | Y | Y |
+| sum | Y | Y | Y | Y |
+| average | Y | Y | Y | Y |
+| min / max | Y | Y | Y | Y |
+| count_distinct | Y | Y | Y | Y |
+| count_distinct_approx | Y | — | — | — |
+| median | Y | — | Y | — |
+| number (custom expr) | Y | Y | — | Y |
+| running_total | Y | Y | — | Y |
+| Measure filters | Y | Y | Y | Y |
+
+### Joins & Relationships
+
+| Feature | Cube.js | LookML | dbt | Omni |
+|---------|:-------:|:------:|:---:|:----:|
+| many_to_one | Y | Y | Y | Y |
+| one_to_many | Y | Y | Y | Y |
+| one_to_one | Y | Y | — | — |
+| Join key extraction from SQL | Y | Y | — | Y |
+| Auto-create implicit FK dims | — | Y | — | Y |
+| Cross-view SQL references | Y | Y | Y | Y |
+
+### SQL References & Rewriting
+
+| Feature | Cube.js | LookML | dbt | Omni |
+|---------|:-------:|:------:|:---:|:----:|
+| `{CUBE}` / `{TABLE}` | Y | — | — | — |
+| `${TABLE}` / `${view.field}` | — | Y | — | Y |
+| `@{CONSTANT}` passthrough | — | Y | — | — |
+| `ref()` / `source()` | — | — | Y | — |
+| Jinja `{{ Dimension() }}` | — | — | Y | — |
+
+### Segments & Filters
+
+| Feature | Cube.js | LookML | dbt | Omni |
+|---------|:-------:|:------:|:---:|:----:|
+| Named segments / filters | Y | Y | — | Y |
+
+### Special Features
+
+| Feature | Cube.js | LookML | dbt | Omni |
+|---------|:-------:|:------:|:---:|:----:|
+| Rolling window measures | Y | — | — | — |
+| Explores (cross-file joins) | — | Y | — | — |
+| Explore `from:` / `view_name:` | — | Y | — | — |
+| Metrics → measures | — | — | Y | — |
+| Topics (field curation) | — | — | — | Y |
+| Directory format (multi-file) | — | — | — | Y |
+| `relationships.yaml` | — | — | — | Y |
+| Type inference from name/format | — | — | — | Y |
+
+### Known Limitations
+
+| Limitation | Cube.js | LookML | dbt | Omni |
+|---------|:-------:|:------:|:---:|:----:|
+| No JS schema support | X | — | — | — |
+| No Liquid templates | — | X | — | — |
+| No complex Jinja | — | — | X | — |
+| Pre-aggregations ignored | X | — | — | — |
+| Drill fields ignored | X | X | — | — |
+| View refinements (`+name`) skipped | — | X | — | — |
+
 ## Format Details
 
 ### Cube.js
