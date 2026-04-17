@@ -1353,11 +1353,18 @@ pub fn resolve_warehouse(
 ///
 /// Returns all SQL statements to execute (in order) plus manifest entries
 /// for reporting. The caller is responsible for executing the statements.
+///
+/// If `previous_entries` is provided (from reading the warehouse manifest
+/// before building), the plan appends `DROP TABLE IF EXISTS` statements at
+/// the end to clean up old rollup tables that were replaced by this build.
+/// Cleanup runs *after* the new tables and manifest are in place, so there
+/// is no downtime window where a rollup is missing.
 pub fn collect_build_sql(
     views: &[&View],
     schema: &str,
     date_str: &str,
     dialect: &Dialect,
+    previous_entries: Option<&[WarehouseRollupEntry]>,
 ) -> BuildPlan {
     let mut statements: Vec<String> = Vec::new();
     let mut manifest_entries: Vec<ManifestEntry> = Vec::new();
@@ -1380,6 +1387,31 @@ pub fn collect_build_sql(
             let entry = build_manifest_entry(view, rollup, schema, date_str);
             statements.extend(generate_manifest_upsert_sql(schema, &entry, dialect));
             manifest_entries.push(entry);
+        }
+    }
+
+    // 4. Clean up old rollup tables replaced by this build.
+    //    Only drop tables whose rollup_hash matches a newly-built entry but
+    //    whose table_name differs (i.e., a previous date-stamped table).
+    if let Some(prev) = previous_entries {
+        let new_tables: std::collections::HashSet<&str> = manifest_entries
+            .iter()
+            .map(|e| e.table_name.as_str())
+            .collect();
+        for old in prev {
+            if manifest_entries
+                .iter()
+                .any(|e| e.rollup_hash == old.rollup_hash)
+                && !new_tables.contains(old.table_name.as_str())
+                && !old.table_name.is_empty()
+            {
+                let fq_old = if let Some((s, t)) = old.table_name.split_once('.') {
+                    dialect.qualify_table(s, t)
+                } else {
+                    dialect.qualify_table(schema, &old.table_name)
+                };
+                statements.push(format!("DROP TABLE IF EXISTS {}", fq_old));
+            }
         }
     }
 
@@ -3134,7 +3166,7 @@ mod tests {
     #[test]
     fn test_collect_build_sql() {
         let view = test_view_with_preaggs();
-        let plan = collect_build_sql(&[&view], "preagg", "20260415", &Dialect::Postgres);
+        let plan = collect_build_sql(&[&view], "preagg", "20260415", &Dialect::Postgres, None);
 
         assert!(!plan.statements.is_empty());
         // Should have: CREATE SCHEMA + CREATE TABLE __manifest + at least one CTAS + upsert
@@ -3148,12 +3180,113 @@ mod tests {
     #[test]
     fn test_collect_build_sql_bigquery_no_schema_ddl() {
         let view = test_view_with_preaggs();
-        let plan = collect_build_sql(&[&view], "preagg", "20260415", &Dialect::BigQuery);
+        let plan = collect_build_sql(&[&view], "preagg", "20260415", &Dialect::BigQuery, None);
 
         // BigQuery should NOT have a CREATE SCHEMA statement
         assert!(!plan.statements[0].contains("CREATE SCHEMA"));
         // First statement should be the manifest table
         assert!(plan.statements[0].to_lowercase().contains("__manifest"));
+    }
+
+    #[test]
+    fn test_collect_build_sql_cleanup_old_tables() {
+        let view = test_view_with_preaggs();
+        // Build today's plan with a "previous" manifest that has an older date
+        let plan_no_prev =
+            collect_build_sql(&[&view], "preagg", "20260415", &Dialect::Postgres, None);
+        let new_hash = &plan_no_prev.manifest_entries[0].rollup_hash;
+
+        let old_entries = vec![WarehouseRollupEntry {
+            view_name: "orders".into(),
+            rollup_name: "by_region".into(),
+            rollup_hash: new_hash.clone(),
+            table_name: "preagg.orders__old_hash__20260410".into(),
+            dimensions: vec!["region".into()],
+            measures: vec![],
+            time_dimension: None,
+            granularity: None,
+            build_date: "2026-04-10".into(),
+        }];
+
+        let plan = collect_build_sql(
+            &[&view],
+            "preagg",
+            "20260415",
+            &Dialect::Postgres,
+            Some(&old_entries),
+        );
+
+        // Should have a DROP for the old table at the end
+        let last = plan.statements.last().unwrap();
+        assert!(
+            last.contains("DROP TABLE IF EXISTS") && last.contains("orders__old_hash__20260410"),
+            "Expected cleanup DROP for old table, got: {}",
+            last
+        );
+    }
+
+    #[test]
+    fn test_collect_build_sql_no_cleanup_same_table() {
+        let view = test_view_with_preaggs();
+        let plan_first =
+            collect_build_sql(&[&view], "preagg", "20260415", &Dialect::Postgres, None);
+        let entry = &plan_first.manifest_entries[0];
+
+        // Simulate previous entry with the SAME table name (same-day rebuild)
+        let old_entries = vec![WarehouseRollupEntry {
+            view_name: entry.view_name.clone(),
+            rollup_name: entry.rollup_name.clone(),
+            rollup_hash: entry.rollup_hash.clone(),
+            table_name: entry.table_name.clone(),
+            dimensions: vec!["region".into()],
+            measures: vec![],
+            time_dimension: None,
+            granularity: None,
+            build_date: "2026-04-15".into(),
+        }];
+
+        let plan = collect_build_sql(
+            &[&view],
+            "preagg",
+            "20260415",
+            &Dialect::Postgres,
+            Some(&old_entries),
+        );
+
+        // No cleanup DROP — the old table IS the new table
+        let drops: Vec<&String> = plan
+            .statements
+            .iter()
+            .filter(|s| {
+                s.starts_with("DROP TABLE IF EXISTS")
+                    && !s.contains(&entry.table_name.replace("preagg.", ""))
+                    || false
+            })
+            .collect();
+        // The only DROP should be the one before CTAS (same table), no extra cleanup
+        assert!(
+            !plan
+                .statements
+                .last()
+                .unwrap()
+                .starts_with("DROP TABLE IF EXISTS"),
+            "Should not drop same table as cleanup: {:?}",
+            plan.statements
+        );
+    }
+
+    #[test]
+    fn test_collect_build_sql_no_cleanup_without_previous() {
+        let view = test_view_with_preaggs();
+        let plan = collect_build_sql(&[&view], "preagg", "20260415", &Dialect::Postgres, None);
+
+        // Last statement should NOT be a cleanup DROP (no previous entries)
+        let last = plan.statements.last().unwrap();
+        assert!(
+            !last.starts_with("DROP TABLE IF EXISTS"),
+            "Should not have cleanup without previous entries, got: {}",
+            last
+        );
     }
 
     // -----------------------------------------------------------------------

@@ -1503,12 +1503,9 @@ fn run_build(
         return Err("No views found".into());
     }
 
-    let plan = preagg::collect_build_sql(&views, &effective_schema, &date_str, &dialect);
-    let all_stmts = &plan.statements;
-    let manifest_entries = &plan.manifest_entries;
-
     if dry_run {
-        for stmt in all_stmts {
+        let plan = preagg::collect_build_sql(&views, &effective_schema, &date_str, &dialect, None);
+        for stmt in &plan.statements {
             println!("{};", stmt);
             println!();
         }
@@ -1525,6 +1522,27 @@ fn run_build(
         } else {
             exec_config.first_connection()?
         };
+
+        // Read existing manifest to find old tables for cleanup
+        let previous_entries = {
+            let manifest_sql = preagg::manifest_query_sql(&effective_schema, &dialect);
+            match crate::executor::execute(&connection, &manifest_sql, &[]) {
+                Ok(result) if !result.rows.is_empty() => {
+                    Some(preagg::parse_manifest_rows(&result.rows))
+                }
+                _ => None, // First build or manifest doesn't exist yet
+            }
+        };
+
+        let plan = preagg::collect_build_sql(
+            &views,
+            &effective_schema,
+            &date_str,
+            &dialect,
+            previous_entries.as_deref(),
+        );
+        let all_stmts = &plan.statements;
+        let manifest_entries = &plan.manifest_entries;
 
         for (i, stmt) in all_stmts.iter().enumerate() {
             eprintln!("[{}/{}] Executing...", i + 1, all_stmts.len());
@@ -1555,7 +1573,7 @@ fn run_build(
 
     #[cfg(not(feature = "exec"))]
     {
-        let _ = (&all_stmts, &manifest_entries, &content, &effective_database);
+        let _ = (&content, &effective_database);
         return Err("build requires an exec-* feature flag to be enabled".into());
     }
 

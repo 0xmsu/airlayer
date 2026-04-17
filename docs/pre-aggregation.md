@@ -122,6 +122,8 @@ For each rollup, `build` creates:
 - A manifest table: `"preagg"."__manifest"` tracking all rollups
 - A rollup table via CTAS: `"preagg"."events__by_platform_daily__abc123__20260415"`
 
+After all new tables are created and the manifest is updated, `build` automatically drops old rollup tables that were replaced. This prevents stale tables from accumulating across rebuilds. Cleanup only runs after the new table and manifest upsert succeed, so there is no downtime.
+
 The manifest stores metadata (view name, rollup name, hash, columns, build date) so that `pull` and `query` can discover available rollups.
 
 ### `airlayer pull`
