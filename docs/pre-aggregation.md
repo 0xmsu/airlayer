@@ -122,6 +122,8 @@ For each rollup, `build` creates:
 - A manifest table: `"preagg"."__manifest"` tracking all rollups
 - A rollup table via CTAS: `"preagg"."events__by_platform_daily__abc123__20260415"`
 
+After all new tables are created and the manifest is updated, `build` automatically drops old rollup tables that were replaced. This prevents stale tables from accumulating across rebuilds. Cleanup only runs after the new table and manifest upsert succeed, so there is no downtime.
+
 The manifest stores metadata (view name, rollup name, hash, columns, build date) so that `pull` and `query` can discover available rollups.
 
 ### `airlayer pull`
@@ -243,9 +245,52 @@ for stmt in &plan.statements {
 | Type | Description |
 |------|-------------|
 | `PreaggResolution` | Enum: `LocalParquet { reagg_sql, parquet_path }` or `WarehouseRollup { reagg_sql, table_name }` |
+| `CachedResolution` | Struct: `reagg_sql` (FROM `"__cache"`), `cache_key`, `entry` — filesystem-independent variant |
 | `WarehouseRollupEntry` | A rollup entry from the warehouse `__manifest` table |
 | `BuildPlan` | All SQL statements + manifest entries for a build operation |
 | `LocalManifest` | The local `manifest.json` structure (from `pull`) |
+
+## WASM / Browser cache API
+
+The WASM module exposes pre-aggregation cache functions for browser use. The Rust side handles pure computation (coverage checking, SQL generation); the JavaScript caller handles I/O (IndexedDB storage, duckdb-wasm execution).
+
+### Functions
+
+| Function | Description |
+|----------|-------------|
+| `cache_resolve(manifest_json, query_json)` | Check if a cached rollup covers a query. Returns `{ reagg_sql, cache_key, entry }` or `null`. |
+| `cache_build_manifest(rows_json, source_database)` | Parse warehouse manifest rows into a `LocalManifest` JSON string for IndexedDB storage. |
+| `cache_key(view_name, rollup_hash)` | Get the IndexedDB key for a rollup (e.g., `"events__a1b2c3d4"`). |
+| `cache_resolve_warehouse(rows_json, query_json, schema, dialect)` | Resolve against warehouse rollup entries. Returns `{ reagg_sql, table_name }` or `null`. |
+
+### Typical browser flow
+
+```javascript
+import init, { cache_build_manifest, cache_resolve, cache_key } from './airlayer_bg.wasm';
+
+// 1. Fetch manifest rows from warehouse and build local manifest
+const manifestJson = cache_build_manifest(JSON.stringify(warehouseRows), "my_warehouse");
+
+// 2. Store manifest + rollup data in IndexedDB
+await idb.put('manifest', manifestJson);
+for (const entry of warehouseRows) {
+  const key = cache_key(entry.view_name, entry.rollup_hash);
+  const data = await fetchRollupData(entry.table_name);
+  await idb.put(key, data);
+}
+
+// 3. On query, check cache coverage
+const resolution = cache_resolve(manifestJson, JSON.stringify(query));
+if (resolution) {
+  // Load cached data into duckdb-wasm table named "__cache"
+  const data = await idb.get(resolution.cache_key);
+  await duckdb.exec(`CREATE TABLE "__cache" AS SELECT * FROM '${dataUrl}'`);
+  const result = await duckdb.exec(resolution.reagg_sql);
+  await duckdb.exec('DROP TABLE "__cache"');
+}
+```
+
+The `reagg_sql` reads from a table named `"__cache"` — the JS caller must create this table in duckdb-wasm with the cached rollup data before executing.
 
 ## Example
 
