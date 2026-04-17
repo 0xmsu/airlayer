@@ -189,7 +189,7 @@ pub fn catalog_list(
 // JavaScript caller handles I/O (IndexedDB storage, duckdb-wasm execution).
 //
 // Typical flow:
-//   1. JS fetches rollup data from warehouse and calls `cache_store_manifest`
+//   1. JS fetches rollup data from warehouse and calls `cache_build_manifest`
 //      to persist the manifest. Rollup data (JSON rows) is stored in
 //      IndexedDB by the JS caller using the cache key.
 //   2. On query, JS reads the manifest and calls `cache_resolve` to check
