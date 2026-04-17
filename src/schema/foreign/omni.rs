@@ -529,12 +529,10 @@ pub fn convert_directory(dir: &std::path::Path) -> Result<ConversionResult, Stri
                         continue;
                     }
                     if let Ok(content) = std::fs::read_to_string(&entry) {
-                        match convert(&content, entry.to_str().unwrap_or("<unknown>")) {
-                            Ok(result) => {
-                                all_views.extend(result.views);
-                                all_warnings.extend(result.warnings);
-                            }
-                            Err(_) => {}
+                        if let Ok(result) = convert(&content, entry.to_str().unwrap_or("<unknown>"))
+                        {
+                            all_views.extend(result.views);
+                            all_warnings.extend(result.warnings);
                         }
                     }
                 }

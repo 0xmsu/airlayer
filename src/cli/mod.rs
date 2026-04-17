@@ -1,7 +1,10 @@
+#[allow(dead_code)]
 mod bootstrap;
+#[allow(dead_code)]
 mod prompts;
 
 use crate::dialect::Dialect;
+#[cfg(feature = "exec")]
 use crate::engine::profiler;
 use crate::engine::query::{FilterOperator, QueryFilter, QueryRequest};
 use crate::engine::{DatasourceDialectMap, PartialConfig, SemanticEngine};
@@ -961,6 +964,7 @@ fn inspect_json(views: &[&crate::schema::models::View]) -> serde_json::Value {
 
 /// Profile mode: run type-aware data profiling for one or all dimensions in a view.
 /// Outputs structured JSON to stdout.
+#[allow(unreachable_code)]
 fn run_profile(
     layer: &SemanticLayer,
     target: &str,
@@ -1071,6 +1075,7 @@ fn run_profile(
 
 /// Schema introspection mode: discover tables, columns, and types from the database.
 /// Outputs structured JSON to stdout.
+#[allow(unreachable_code)]
 fn run_schema_introspect(
     config: Option<&PathBuf>,
     datasource: Option<&str>,
@@ -1582,6 +1587,7 @@ fn run_convert(
 }
 
 /// Build pre-aggregated rollup tables in the warehouse.
+#[allow(unreachable_code)]
 fn run_build(
     globals: Option<&PathBuf>,
     config: Option<&PathBuf>,
@@ -1733,12 +1739,14 @@ fn run_build(
 }
 
 /// Pull pre-aggregated data from the warehouse to local Parquet files.
+#[allow(unreachable_code)]
 fn run_pull(
     config: Option<&PathBuf>,
     schema: &str,
     database: Option<&str>,
     view_filter: Option<&str>,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    #[cfg(feature = "exec")]
     use crate::engine::preagg;
 
     let ctx = resolve_project_context(config)?;
@@ -1878,6 +1886,7 @@ fn run_pull(
 
 /// Write an ExecutionResult to a Parquet file using an in-memory DuckDB connection.
 #[cfg(feature = "exec-duckdb")]
+#[allow(dead_code)]
 fn write_parquet(
     data: &crate::executor::ExecutionResult,
     path: &std::path::Path,
@@ -1954,6 +1963,7 @@ fn write_parquet(
 }
 
 #[cfg(not(feature = "exec-duckdb"))]
+#[allow(dead_code)]
 fn write_parquet(
     _data: &crate::executor::ExecutionResult,
     _path: &std::path::Path,
@@ -2109,6 +2119,7 @@ fn run_execute(
                     }) =
                         crate::engine::preagg::resolve_local(&request, &local_manifest, &cache_dir)
                     {
+                        let _ = &reagg_sql; // used in exec-duckdb block below
                         #[cfg(feature = "exec-duckdb")]
                         {
                             if let Ok(duck_conn) = duckdb::Connection::open_in_memory() {
@@ -2432,9 +2443,8 @@ fn run_init(
     // Detect foreign semantic models before starting the flow
     let foreign_format = crate::schema::foreign::detect_format(target);
 
-    if is_interactive && foreign_format.is_some() {
+    if let (true, Some(format)) = (is_interactive, foreign_format) {
         // --- Foreign model repo flow ---
-        let format = foreign_format.unwrap();
         run_init_foreign(format, target, db_type_flag, &config_path, &mut created)?;
     } else if is_interactive {
         // --- Interactive discovery flow ---

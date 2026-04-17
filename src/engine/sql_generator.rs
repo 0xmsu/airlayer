@@ -4303,9 +4303,8 @@ mod tests {
 
     #[test]
     fn test_count_distinct_approx() {
-        let (eval, jg, layer) = make_test_engine();
+        let (_eval, _jg, _layer) = make_test_engine();
         let dialect = Dialect::BigQuery;
-        let gen = SqlGenerator::new(&eval, &jg, &dialect, &layer);
 
         // Build a layer with count_distinct_approx measure
         let layer = SemanticLayer::new(

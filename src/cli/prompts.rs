@@ -1188,7 +1188,7 @@ CUBEJS_DB_SCHEMA=public
         assert_eq!(info.get("user").unwrap(), "cube_user");
         assert_eq!(info.get("schema").unwrap(), "public");
         // Password should NOT be extracted
-        assert!(info.get("password").is_none());
+        assert_eq!(info.get("password"), None);
     }
 
     #[test]

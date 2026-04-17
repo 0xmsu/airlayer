@@ -336,7 +336,7 @@ fn cube_parity_conversion_compiles() {
     let engine = load_cube_parity_engine();
 
     // Verify we can compile various queries without errors
-    let queries = vec![
+    let queries = [
         QueryRequest {
             measures: vec!["orders.count".to_string()],
             dimensions: vec!["orders.status".to_string()],
