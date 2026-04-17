@@ -1275,6 +1275,48 @@ pub fn resolve_local(
     })
 }
 
+/// Result of cache-based resolution (no filesystem dependency).
+///
+/// Returned by [`resolve_cached`]. The caller is responsible for loading the
+/// data identified by `cache_key` and executing `reagg_sql` against it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CachedResolution {
+    /// Re-aggregation SQL with `FROM "__cache"` as placeholder table name.
+    /// The caller should either create a table named `__cache` with the cached
+    /// data, or replace `"__cache"` with the actual data source.
+    pub reagg_sql: String,
+    /// Cache key for looking up the stored data (e.g., `"events__a1b2c3d4"`).
+    pub cache_key: String,
+    /// The matched rollup entry (for metadata inspection).
+    pub entry: LocalRollupEntry,
+}
+
+/// Try to resolve a query from a cached manifest, without filesystem checks.
+///
+/// This is the WASM/browser-friendly variant of [`resolve_local`]. Instead of
+/// checking for a Parquet file on disk, it returns the cache key and a reagg SQL
+/// that reads from a placeholder table `"__cache"`. The caller (e.g., JavaScript
+/// using duckdb-wasm + IndexedDB) is responsible for loading the data into a
+/// table named `__cache` before executing the SQL.
+///
+/// Returns `None` if no rollup covers the query.
+pub fn resolve_cached(
+    request: &crate::engine::query::QueryRequest,
+    manifest: &LocalManifest,
+) -> Option<CachedResolution> {
+    let entry = check_coverage(request, &manifest.rollups)?;
+    let cache_key = format!("{}__{}", entry.view_name, entry.rollup_hash);
+    let reagg_sql = generate_reagg_sql(request, entry, "__cache");
+    // The generated SQL will have: FROM read_parquet('__cache')
+    // Replace with a plain table reference for in-memory use
+    let reagg_sql = reagg_sql.replace("read_parquet('__cache')", "\"__cache\"");
+    Some(CachedResolution {
+        reagg_sql,
+        cache_key,
+        entry: entry.clone(),
+    })
+}
+
 /// Try to resolve a query from warehouse rollup tables.
 ///
 /// Returns `Some(WarehouseRollup { ... })` if a rollup covers the query.
@@ -3117,5 +3159,94 @@ mod tests {
         assert!(!plan.statements[0].contains("CREATE SCHEMA"));
         // First statement should be the manifest table
         assert!(plan.statements[0].to_lowercase().contains("__manifest"));
+    }
+
+    // -----------------------------------------------------------------------
+    // resolve_cached (WASM / browser cache)
+    // -----------------------------------------------------------------------
+
+    fn make_test_local_manifest() -> LocalManifest {
+        LocalManifest {
+            pulled_at: "2026-04-15T00:00:00Z".into(),
+            source_database: "warehouse".into(),
+            rollups: vec![LocalRollupEntry {
+                view_name: "events".into(),
+                rollup_name: "by_platform".into(),
+                rollup_hash: "abc123".into(),
+                file: "events__abc123".into(),
+                dimensions: vec!["platform".into()],
+                measures: vec![
+                    serde_json::json!({"name":"total_revenue","type":"sum","columns":["total_revenue__sum"]}),
+                    serde_json::json!({"name":"event_count","type":"count","columns":["event_count__count"]}),
+                ],
+                time_dimension: None,
+                granularity: None,
+                build_date: "2026-04-15".into(),
+            }],
+        }
+    }
+
+    #[test]
+    fn test_resolve_cached_basic() {
+        let manifest = make_test_local_manifest();
+        let request = QueryRequest {
+            measures: vec!["events.total_revenue".to_string()],
+            dimensions: vec!["events.platform".to_string()],
+            ..QueryRequest::new()
+        };
+
+        let result = resolve_cached(&request, &manifest);
+        assert!(result.is_some());
+        let res = result.unwrap();
+        assert_eq!(res.cache_key, "events__abc123");
+        assert!(res.reagg_sql.contains("\"__cache\""));
+        assert!(!res.reagg_sql.contains("read_parquet"));
+        assert!(res.reagg_sql.contains("SUM"));
+        assert!(res.reagg_sql.contains("platform"));
+    }
+
+    #[test]
+    fn test_resolve_cached_miss() {
+        let manifest = make_test_local_manifest();
+        // Request a dimension not in the rollup
+        let request = QueryRequest {
+            measures: vec!["events.total_revenue".to_string()],
+            dimensions: vec!["events.country".to_string()],
+            ..QueryRequest::new()
+        };
+
+        let result = resolve_cached(&request, &manifest);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_resolve_cached_returns_entry_metadata() {
+        let manifest = make_test_local_manifest();
+        let request = QueryRequest {
+            measures: vec!["events.event_count".to_string()],
+            dimensions: vec!["events.platform".to_string()],
+            ..QueryRequest::new()
+        };
+
+        let result = resolve_cached(&request, &manifest).unwrap();
+        assert_eq!(result.entry.view_name, "events");
+        assert_eq!(result.entry.rollup_name, "by_platform");
+        assert_eq!(result.entry.rollup_hash, "abc123");
+    }
+
+    #[test]
+    fn test_resolve_cached_empty_manifest() {
+        let manifest = LocalManifest {
+            pulled_at: "2026-04-15T00:00:00Z".into(),
+            source_database: "warehouse".into(),
+            rollups: vec![],
+        };
+        let request = QueryRequest {
+            measures: vec!["events.total_revenue".to_string()],
+            dimensions: vec!["events.platform".to_string()],
+            ..QueryRequest::new()
+        };
+
+        assert!(resolve_cached(&request, &manifest).is_none());
     }
 }
