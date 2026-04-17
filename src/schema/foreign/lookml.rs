@@ -435,6 +435,7 @@ fn convert_view(name: &str, fields: &[(String, LkmlValue)], warnings: &mut Vec<S
             Some(measures)
         },
         segments,
+        pre_aggregations: None,
         meta: None,
     }
 }

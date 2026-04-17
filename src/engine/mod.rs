@@ -3,6 +3,7 @@ pub mod evaluator;
 pub mod join_graph;
 pub mod member_sql;
 pub mod motifs;
+pub mod preagg;
 pub mod profiler;
 pub mod query;
 pub mod sql_generator;
@@ -116,11 +117,22 @@ pub struct DatabaseConfig {
     pub db_type: String,
 }
 
+/// Pre-aggregation configuration from config.yml.
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct PreAggConfig {
+    /// Schema/database name for pre-aggregated tables. Default: "AIRLAYER".
+    pub schema: Option<String>,
+    /// Which database to use for pre-aggregation. Default: first database.
+    pub database: Option<String>,
+}
+
 /// Partial config.yml — only the fields we need.
 #[derive(Debug, Clone, serde::Deserialize)]
 pub struct PartialConfig {
     #[serde(default)]
     pub databases: Vec<DatabaseConfig>,
+    #[serde(default)]
+    pub pre_aggregations: Option<PreAggConfig>,
 }
 
 /// The main semantic engine. Load .view.yml files, compile queries to SQL.
@@ -304,6 +316,33 @@ mod tests {
     use super::*;
     use crate::schema::models::*;
 
+    #[test]
+    fn test_partial_config_with_preagg() {
+        let yaml = r#"
+databases:
+  - name: warehouse
+    type: clickhouse
+pre_aggregations:
+  schema: MY_CACHE
+  database: warehouse
+"#;
+        let config: PartialConfig = serde_yaml::from_str(yaml).expect("parse config");
+        let preagg = config.pre_aggregations.as_ref().expect("has preagg");
+        assert_eq!(preagg.schema.as_deref(), Some("MY_CACHE"));
+        assert_eq!(preagg.database.as_deref(), Some("warehouse"));
+    }
+
+    #[test]
+    fn test_partial_config_preagg_defaults() {
+        let yaml = r#"
+databases:
+  - name: warehouse
+    type: clickhouse
+"#;
+        let config: PartialConfig = serde_yaml::from_str(yaml).expect("parse config");
+        assert!(config.pre_aggregations.is_none());
+    }
+
     fn simple_view_with_dialect(name: &str, dialect: Option<&str>) -> View {
         View {
             name: name.to_string(),
@@ -341,6 +380,7 @@ mod tests {
                 meta: None,
             }]),
             segments: vec![],
+            pre_aggregations: None,
             meta: None,
         }
     }

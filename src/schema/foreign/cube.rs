@@ -306,6 +306,7 @@ fn convert_cube(
             Some(measures)
         },
         segments,
+        pre_aggregations: None,
         meta: None,
     }
 }

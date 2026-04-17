@@ -99,6 +99,10 @@ pub enum Commands {
         /// Defaults to the first database in config.yml.
         #[arg(long)]
         datasource: Option<String>,
+
+        /// Skip pre-aggregation cache (local and warehouse), go straight to raw SQL.
+        #[arg(long)]
+        no_cache: bool,
     },
 
     /// Validate .view.yml files.
@@ -159,6 +163,52 @@ pub enum Commands {
         /// Print generated YAML to stdout instead of writing files.
         #[arg(long)]
         stdout: bool,
+    },
+
+    /// Pre-aggregate views into rollup tables in the warehouse.
+    Build {
+        /// Path to config.yml.
+        #[arg(short, long)]
+        config: Option<PathBuf>,
+
+        /// Target schema name for pre-aggregated tables (default: AIRLAYER).
+        #[arg(long, default_value = "AIRLAYER")]
+        schema: String,
+
+        /// Which database to build against (default: first in config.yml).
+        #[arg(long)]
+        database: Option<String>,
+
+        /// Build only a specific view.
+        #[arg(long)]
+        view: Option<String>,
+
+        /// Print the CTAS statements without executing.
+        #[arg(long)]
+        dry_run: bool,
+
+        /// Path to globals file (optional).
+        #[arg(short, long)]
+        globals: Option<PathBuf>,
+    },
+
+    /// Pull pre-aggregated data from the warehouse to local Parquet cache.
+    Pull {
+        /// Path to config.yml.
+        #[arg(short, long)]
+        config: Option<PathBuf>,
+
+        /// Source schema name (default: AIRLAYER).
+        #[arg(long, default_value = "AIRLAYER")]
+        schema: String,
+
+        /// Which database to pull from (default: first in config.yml).
+        #[arg(long)]
+        database: Option<String>,
+
+        /// Pull only a specific view.
+        #[arg(long)]
+        view: Option<String>,
     },
 
     /// List all views, dimensions, and measures.
@@ -571,6 +621,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
             motif_param,
             execute,
             datasource,
+            no_cache,
         } => {
             // Check if this is a saved query file
             let is_named = name.is_some();
@@ -615,6 +666,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
                     motif,
                     motif_param,
                     datasource,
+                    no_cache,
                 );
             } else {
                 run_compile(
@@ -677,6 +729,38 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
                     std::process::exit(1);
                 }
             }
+        }
+
+        Commands::Build {
+            config,
+            schema,
+            database,
+            view,
+            dry_run,
+            globals,
+        } => {
+            run_build(
+                globals.as_ref(),
+                config.as_ref(),
+                &schema,
+                database.as_deref(),
+                view.as_deref(),
+                dry_run,
+            )?;
+        }
+
+        Commands::Pull {
+            config,
+            schema,
+            database,
+            view,
+        } => {
+            run_pull(
+                config.as_ref(),
+                &schema,
+                database.as_deref(),
+                view.as_deref(),
+            )?;
         }
 
         Commands::Inspect {
@@ -1497,6 +1581,386 @@ fn run_convert(
     Ok(())
 }
 
+/// Build pre-aggregated rollup tables in the warehouse.
+fn run_build(
+    globals: Option<&PathBuf>,
+    config: Option<&PathBuf>,
+    schema: &str,
+    database: Option<&str>,
+    view_filter: Option<&str>,
+    dry_run: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use crate::engine::preagg;
+
+    let ctx = resolve_project_context(config)?;
+    let config_path = ctx
+        .config_path
+        .as_ref()
+        .ok_or("build requires a config.yml (auto-detected or via --config)")?;
+
+    // Check for schema override in config.yml
+    let content = std::fs::read_to_string(config_path)
+        .map_err(|e| format!("Failed to read config {}: {}", config_path.display(), e))?;
+    let partial: PartialConfig =
+        serde_yaml::from_str(&content).map_err(|e| format!("Failed to parse config: {}", e))?;
+
+    let effective_schema = if schema != "AIRLAYER" {
+        schema.to_string() // CLI flag takes precedence
+    } else if let Some(ref pa) = partial.pre_aggregations {
+        pa.schema.clone().unwrap_or_else(|| "AIRLAYER".to_string())
+    } else {
+        "AIRLAYER".to_string()
+    };
+
+    let effective_database = database.map(|s| s.to_string()).or_else(|| {
+        partial
+            .pre_aggregations
+            .as_ref()
+            .and_then(|pa| pa.database.clone())
+    });
+
+    let _dialects = build_dialect_map(ctx.config_path.as_ref(), None)?;
+    let parser = make_parser(globals)?;
+    let layer = load_from_directory(&parser, &ctx.base_dir)?;
+
+    // Resolve dialect from config
+    let dialect = if let Some(ref db_name) = effective_database {
+        let db_config = partial
+            .databases
+            .iter()
+            .find(|d| d.name == *db_name)
+            .ok_or_else(|| format!("Database '{}' not found in config", db_name))?;
+        Dialect::from_str(&db_config.db_type)
+            .ok_or_else(|| format!("Unknown dialect: {}", db_config.db_type))?
+    } else if let Some(first) = partial.databases.first() {
+        Dialect::from_str(&first.db_type)
+            .ok_or_else(|| format!("Unknown dialect: {}", first.db_type))?
+    } else {
+        return Err("No databases configured in config.yml".into());
+    };
+
+    let date_str = chrono::Local::now().format("%Y%m%d").to_string();
+
+    // Filter views if requested
+    let views: Vec<&crate::schema::models::View> = layer
+        .views
+        .iter()
+        .filter(|v| view_filter.is_none_or(|f| v.name == f))
+        .collect();
+
+    if views.is_empty() {
+        if let Some(name) = view_filter {
+            return Err(format!("View '{}' not found", name).into());
+        }
+        return Err("No views found".into());
+    }
+
+    if dry_run {
+        let plan = preagg::collect_build_sql(&views, &effective_schema, &date_str, &dialect, None);
+        for stmt in &plan.statements {
+            println!("{};", stmt);
+            println!();
+        }
+        return Ok(());
+    }
+
+    // Execute against the warehouse
+    #[cfg(feature = "exec")]
+    {
+        let exec_config: crate::executor::ExecutionConfig =
+            serde_yaml::from_str(&content).map_err(|e| format!("Failed to parse config: {}", e))?;
+        let connection = if let Some(db_name) = &effective_database {
+            exec_config.find_connection(db_name)?
+        } else {
+            exec_config.first_connection()?
+        };
+
+        // Read existing manifest to find old tables for cleanup
+        let previous_entries = {
+            let manifest_sql = preagg::manifest_query_sql(&effective_schema, &dialect);
+            match crate::executor::execute(&connection, &manifest_sql, &[]) {
+                Ok(result) if !result.rows.is_empty() => {
+                    Some(preagg::parse_manifest_rows(&result.rows))
+                }
+                _ => None, // First build or manifest doesn't exist yet
+            }
+        };
+
+        let plan = preagg::collect_build_sql(
+            &views,
+            &effective_schema,
+            &date_str,
+            &dialect,
+            previous_entries.as_deref(),
+        );
+        let all_stmts = &plan.statements;
+        let manifest_entries = &plan.manifest_entries;
+
+        for (i, stmt) in all_stmts.iter().enumerate() {
+            eprintln!("[{}/{}] Executing...", i + 1, all_stmts.len());
+            crate::executor::execute(&connection, stmt, &[])
+                .map_err(|e| format!("Build statement {} failed: {}\nSQL: {}", i + 1, e, stmt))?;
+        }
+
+        eprintln!(
+            "Build complete: {} rollup(s) in schema '{}'",
+            manifest_entries.len(),
+            effective_schema
+        );
+        // Output summary as JSON
+        let summary = serde_json::json!({
+            "status": "success",
+            "schema": effective_schema,
+            "rollups": manifest_entries.iter().map(|e| serde_json::json!({
+                "view": e.view_name,
+                "rollup": e.rollup_name,
+                "table": e.table_name,
+            })).collect::<Vec<_>>(),
+        });
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&summary).expect("serialize")
+        );
+    }
+
+    #[cfg(not(feature = "exec"))]
+    {
+        let _ = (&content, &effective_database);
+        return Err("build requires an exec-* feature flag to be enabled".into());
+    }
+
+    Ok(())
+}
+
+/// Pull pre-aggregated data from the warehouse to local Parquet files.
+fn run_pull(
+    config: Option<&PathBuf>,
+    schema: &str,
+    database: Option<&str>,
+    view_filter: Option<&str>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use crate::engine::preagg;
+
+    let ctx = resolve_project_context(config)?;
+    let config_path = ctx
+        .config_path
+        .as_ref()
+        .ok_or("pull requires a config.yml (auto-detected or via --config)")?;
+    let content = std::fs::read_to_string(config_path)
+        .map_err(|e| format!("Failed to read config {}: {}", config_path.display(), e))?;
+    let partial: PartialConfig =
+        serde_yaml::from_str(&content).map_err(|e| format!("Failed to parse config: {}", e))?;
+
+    let effective_schema = if schema != "AIRLAYER" {
+        schema.to_string()
+    } else if let Some(ref pa) = partial.pre_aggregations {
+        pa.schema.clone().unwrap_or_else(|| "AIRLAYER".to_string())
+    } else {
+        "AIRLAYER".to_string()
+    };
+
+    let effective_database = database.map(|s| s.to_string()).or_else(|| {
+        partial
+            .pre_aggregations
+            .as_ref()
+            .and_then(|pa| pa.database.clone())
+    });
+
+    #[cfg(feature = "exec")]
+    {
+        // Resolve dialect for the target database
+        let dialect = if let Some(ref db_name) = effective_database {
+            let db_config = partial
+                .databases
+                .iter()
+                .find(|d| d.name == *db_name)
+                .ok_or_else(|| format!("Database '{}' not found in config", db_name))?;
+            Dialect::from_str(&db_config.db_type)
+                .ok_or_else(|| format!("Unknown dialect: {}", db_config.db_type))?
+        } else if let Some(first) = partial.databases.first() {
+            Dialect::from_str(&first.db_type)
+                .ok_or_else(|| format!("Unknown dialect: {}", first.db_type))?
+        } else {
+            return Err("No databases configured in config.yml".into());
+        };
+
+        let exec_config: crate::executor::ExecutionConfig =
+            serde_yaml::from_str(&content).map_err(|e| format!("Failed to parse config: {}", e))?;
+        let connection = if let Some(ref db_name) = effective_database {
+            exec_config.find_connection(db_name)?
+        } else {
+            exec_config.first_connection()?
+        };
+
+        // 1. Read manifest from warehouse
+        let manifest_sql = preagg::manifest_query_sql(&effective_schema, &dialect);
+        let manifest_result = crate::executor::execute(&connection, &manifest_sql, &[])
+            .map_err(|e| format!("Failed to read manifest: {}", e))?;
+
+        if manifest_result.rows.is_empty() {
+            return Err(
+                format!("No rollups found in {}.{}", effective_schema, "__manifest").into(),
+            );
+        }
+
+        // 2. Parse manifest rows and apply view filter
+        let warehouse_entries: Vec<preagg::WarehouseRollupEntry> =
+            preagg::parse_manifest_rows(&manifest_result.rows)
+                .into_iter()
+                .filter(|e| view_filter.is_none_or(|f| e.view_name == f))
+                .collect();
+
+        if warehouse_entries.is_empty() {
+            return Err("No matching rollups found to pull".into());
+        }
+
+        // 3. Create cache directory and download each rollup
+        let cache_dir = ctx.base_dir.join(".airlayer").join("cache");
+        std::fs::create_dir_all(&cache_dir)?;
+
+        let mut local_entries: Vec<preagg::LocalRollupEntry> = Vec::new();
+
+        for entry in &warehouse_entries {
+            let parquet_filename = format!("{}__{}.parquet", entry.view_name, entry.rollup_hash);
+            let parquet_path = cache_dir.join(&parquet_filename);
+
+            eprintln!(
+                "Pulling {}.{} → {}",
+                entry.view_name, entry.rollup_name, parquet_filename
+            );
+
+            // SELECT all data from the pre-agg table (re-quote the stored name)
+            let select_sql = if let Some((s, t)) = entry.table_name.split_once('.') {
+                format!("SELECT * FROM {}", dialect.qualify_table(s, t))
+            } else {
+                format!(
+                    "SELECT * FROM {}",
+                    dialect.quote_identifier(&entry.table_name)
+                )
+            };
+            let data = crate::executor::execute(&connection, &select_sql, &[])
+                .map_err(|e| format!("Failed to pull {}: {}", entry.table_name, e))?;
+
+            // Write to Parquet using DuckDB
+            write_parquet(&data, &parquet_path)?;
+
+            let mut local = entry.to_local_entry();
+            local.file = parquet_filename;
+            local_entries.push(local);
+        }
+
+        // 4. Write local manifest.json
+        let local_manifest = preagg::LocalManifest {
+            pulled_at: chrono::Utc::now().to_rfc3339(),
+            source_database: effective_database.unwrap_or_else(|| "default".to_string()),
+            rollups: local_entries,
+        };
+        let manifest_path = cache_dir.join("manifest.json");
+        let manifest_json = serde_json::to_string_pretty(&local_manifest)?;
+        std::fs::write(&manifest_path, &manifest_json)?;
+
+        eprintln!(
+            "Pull complete: {} rollup(s) → {}",
+            local_manifest.rollups.len(),
+            cache_dir.display()
+        );
+        println!("{}", manifest_json);
+    }
+
+    #[cfg(not(feature = "exec"))]
+    {
+        let _ = (effective_schema, effective_database, view_filter);
+        return Err("pull requires an exec-* feature flag to be enabled".into());
+    }
+
+    Ok(())
+}
+
+/// Write an ExecutionResult to a Parquet file using an in-memory DuckDB connection.
+#[cfg(feature = "exec-duckdb")]
+fn write_parquet(
+    data: &crate::executor::ExecutionResult,
+    path: &std::path::Path,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if data.rows.is_empty() {
+        // Empty table — write a zero-row Parquet (skip gracefully)
+        eprintln!("  Warning: no rows to write, skipping Parquet output");
+        return Ok(());
+    }
+
+    let conn = duckdb::Connection::open_in_memory()
+        .map_err(|e| format!("Failed to open DuckDB: {}", e))?;
+
+    // Infer DuckDB column types from JSON values in the first row
+    let first_row = data.rows.first();
+    let columns: Vec<String> = data
+        .columns
+        .iter()
+        .map(|c| {
+            let col_type = first_row
+                .and_then(|row| row.get(c))
+                .map(|v| match v {
+                    serde_json::Value::Number(n) => {
+                        if n.is_f64() {
+                            "DOUBLE"
+                        } else {
+                            "BIGINT"
+                        }
+                    }
+                    serde_json::Value::Bool(_) => "BOOLEAN",
+                    _ => "VARCHAR",
+                })
+                .unwrap_or("VARCHAR");
+            format!("\"{}\" {}", c.replace('"', "\"\""), col_type)
+        })
+        .collect();
+    let create_sql = format!("CREATE TABLE __export ({})", columns.join(", "));
+    conn.execute_batch(&create_sql)
+        .map_err(|e| format!("Failed to create export table: {}", e))?;
+
+    // Insert rows
+    let placeholders: Vec<String> = data.columns.iter().map(|_| "?".to_string()).collect();
+    let insert_sql = format!("INSERT INTO __export VALUES ({})", placeholders.join(", "));
+
+    for row in &data.rows {
+        let values: Vec<String> = data
+            .columns
+            .iter()
+            .map(|col| {
+                row.get(col)
+                    .map(|v| match v {
+                        serde_json::Value::Null => String::new(),
+                        serde_json::Value::String(s) => s.clone(),
+                        other => other.to_string(),
+                    })
+                    .unwrap_or_default()
+            })
+            .collect();
+        let params: Vec<&dyn duckdb::ToSql> =
+            values.iter().map(|v| v as &dyn duckdb::ToSql).collect();
+        conn.execute(&insert_sql, params.as_slice())
+            .map_err(|e| format!("Failed to insert row: {}", e))?;
+    }
+
+    // Export to Parquet
+    let path_str = path.to_str().ok_or("Invalid path")?;
+    conn.execute_batch(&format!(
+        "COPY __export TO '{}' (FORMAT PARQUET)",
+        path_str.replace('\'', "''")
+    ))
+    .map_err(|e| format!("Failed to export Parquet: {}", e))?;
+
+    Ok(())
+}
+
+#[cfg(not(feature = "exec-duckdb"))]
+fn write_parquet(
+    _data: &crate::executor::ExecutionResult,
+    _path: &std::path::Path,
+) -> Result<(), Box<dyn std::error::Error>> {
+    Err("pull requires the exec-duckdb feature flag".into())
+}
+
 /// Compile-only path (no --execute). Prints raw SQL to stdout.
 fn run_compile(
     globals: Option<PathBuf>,
@@ -1561,6 +2025,7 @@ fn run_execute(
     motif: Option<String>,
     motif_param: Vec<String>,
     datasource: Option<String>,
+    no_cache: bool,
 ) {
     use crate::executor::QueryEnvelope;
 
@@ -1583,6 +2048,7 @@ fn run_execute(
         motif: Option<String>,
         motif_param: Vec<String>,
         datasource: Option<&str>,
+        no_cache: bool,
     ) -> Result<QueryEnvelope, QueryEnvelope> {
         let err = |stage, msg: String, sql: Option<String>, columns: &[_], views: Vec<String>| {
             QueryEnvelope::error(stage, msg, sql, columns, views)
@@ -1627,6 +2093,128 @@ fn run_execute(
                 views_used.clone(),
             )
         })?;
+
+        // --- Pre-aggregation cache resolution ---
+        if !no_cache {
+            // Layer 1: Check local Parquet cache
+            let cache_dir = ctx.base_dir.join(".airlayer").join("cache");
+            let manifest_path = cache_dir.join("manifest.json");
+            if let Ok(manifest_content) = std::fs::read_to_string(&manifest_path) {
+                if let Ok(local_manifest) =
+                    serde_json::from_str::<crate::engine::preagg::LocalManifest>(&manifest_content)
+                {
+                    if let Some(crate::engine::preagg::PreaggResolution::LocalParquet {
+                        reagg_sql,
+                        ..
+                    }) =
+                        crate::engine::preagg::resolve_local(&request, &local_manifest, &cache_dir)
+                    {
+                        #[cfg(feature = "exec-duckdb")]
+                        {
+                            if let Ok(duck_conn) = duckdb::Connection::open_in_memory() {
+                                if let Ok(mut stmt) = duck_conn.prepare(&reagg_sql) {
+                                    let columns: Vec<String> = (0..stmt.column_count())
+                                        .map(|i| stmt.column_name(i).map_or("?", |v| v).to_string())
+                                        .collect();
+                                    if let Ok(mut duckdb_rows) = stmt.query([]) {
+                                        let mut rows = Vec::new();
+                                        loop {
+                                            match duckdb_rows.next() {
+                                                Ok(Some(row)) => {
+                                                    let mut obj = serde_json::Map::new();
+                                                    for (i, col) in columns.iter().enumerate() {
+                                                        let val = crate::executor::duckdb::duckdb_value_to_json(row, i);
+                                                        obj.insert(col.clone(), val);
+                                                    }
+                                                    rows.push(obj);
+                                                }
+                                                Ok(None) => break,
+                                                Err(_) => break,
+                                            }
+                                        }
+                                        return Ok(QueryEnvelope::success(
+                                            result.sql,
+                                            &result.columns,
+                                            crate::executor::ExecutionResult { columns, rows },
+                                            views_used,
+                                        ));
+                                    }
+                                }
+                            }
+                            // If DuckDB fails, fall through silently to next layer
+                        }
+                    }
+                }
+            }
+
+            // Layer 2: Check warehouse pre-agg tables
+            if let Some(config_path) = ctx.config_path.as_ref() {
+                if let Ok(content) = std::fs::read_to_string(config_path) {
+                    if let Ok(partial) = serde_yaml::from_str::<PartialConfig>(&content) {
+                        if let Ok(exec_config) =
+                            serde_yaml::from_str::<crate::executor::ExecutionConfig>(&content)
+                        {
+                            let connection_result = if let Some(ds) = datasource {
+                                exec_config.find_connection(ds)
+                            } else {
+                                exec_config.first_connection()
+                            };
+                            if let Ok(ref connection) = connection_result {
+                                let preagg_schema = partial
+                                    .pre_aggregations
+                                    .as_ref()
+                                    .and_then(|pa| pa.schema.clone())
+                                    .unwrap_or_else(|| "AIRLAYER".to_string());
+
+                                let preagg_dialect = if let Some(ds) = datasource {
+                                    partial
+                                        .databases
+                                        .iter()
+                                        .find(|d| d.name == ds)
+                                        .and_then(|d| Dialect::from_str(&d.db_type))
+                                } else {
+                                    partial
+                                        .databases
+                                        .first()
+                                        .and_then(|d| Dialect::from_str(&d.db_type))
+                                };
+
+                                if let Some(ref dialect) = preagg_dialect {
+                                    let manifest_sql = crate::engine::preagg::manifest_query_sql(
+                                        &preagg_schema,
+                                        dialect,
+                                    );
+                                    if let Ok(manifest_result) =
+                                        crate::executor::execute(connection, &manifest_sql, &[])
+                                    {
+                                        let entries = crate::engine::preagg::parse_manifest_rows(
+                                            &manifest_result.rows,
+                                        );
+                                        if let Some(crate::engine::preagg::PreaggResolution::WarehouseRollup {
+                                            reagg_sql, ..
+                                        }) = crate::engine::preagg::resolve_warehouse(
+                                            &request, &entries, &preagg_schema, dialect,
+                                        ) {
+                                            if let Ok(exec_result) =
+                                                crate::executor::execute(connection, &reagg_sql, &[])
+                                            {
+                                                return Ok(QueryEnvelope::success(
+                                                    result.sql,
+                                                    &result.columns,
+                                                    exec_result,
+                                                    views_used,
+                                                ));
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        // --- End pre-aggregation cache resolution ---
 
         // Stage 4: resolve connection & execute
         let config_path = ctx.config_path.as_ref().ok_or_else(|| {
@@ -1709,6 +2297,7 @@ fn run_execute(
         motif,
         motif_param,
         datasource.as_deref(),
+        no_cache,
     ) {
         Ok(env) => {
             is_error = false;
@@ -3166,5 +3755,18 @@ airlayer inspect --queries
 airlayer inspect --json
 airlayer inspect --motifs --json
 airlayer inspect --queries --json
+
+# Pre-aggregate views into warehouse rollup tables
+airlayer build --config config.yml
+airlayer build --schema MY_SCHEMA --database warehouse --dry-run
+airlayer build --view orders
+
+# Download pre-aggregated data to local Parquet cache
+airlayer pull --config config.yml
+airlayer pull --view orders
+
+# Query with cache-aware execution (local cache → warehouse pre-agg → raw SQL)
+airlayer query -q '...' -x                    # uses cache if available
+airlayer query -q '...' -x --no-cache          # skip cache, go straight to raw SQL
 ```
 ";

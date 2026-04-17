@@ -1,12 +1,15 @@
 //! WebAssembly bindings for airlayer.
 //!
-//! Provides a JS-friendly API for compiling semantic queries to SQL.
+//! Provides a JS-friendly API for compiling semantic queries to SQL,
+//! and pre-aggregation cache management via IndexedDB.
+//!
 //! Build with: `wasm-pack build --target web --no-default-features --features wasm`
 
 use wasm_bindgen::prelude::*;
 
 use crate::dialect::Dialect;
 use crate::engine::catalog;
+use crate::engine::preagg;
 use crate::engine::query::QueryRequest;
 use crate::engine::{DatasourceDialectMap, SemanticEngine};
 use crate::schema::models::SemanticLayer;
@@ -176,4 +179,143 @@ pub fn catalog_list(
     let entries = catalog::catalog(&layer);
 
     serde_wasm_bindgen::to_value(&entries).map_err(|e| JsValue::from_str(&e.to_string()))
+}
+
+// ---------------------------------------------------------------------------
+// Pre-aggregation cache API
+//
+// These functions enable browser-based pre-aggregation caching. The WASM
+// module handles pure computation (coverage checking, SQL generation). The
+// JavaScript caller handles I/O (IndexedDB storage, duckdb-wasm execution).
+//
+// Typical flow:
+//   1. JS fetches rollup data from warehouse and calls `cache_build_manifest`
+//      to persist the manifest. Rollup data (JSON rows) is stored in
+//      IndexedDB by the JS caller using the cache key.
+//   2. On query, JS reads the manifest and calls `cache_resolve` to check
+//      if a cached rollup covers the query.
+//   3. If resolved, JS loads the cached data into a duckdb-wasm table
+//      named `__cache` and executes the returned `reagg_sql`.
+// ---------------------------------------------------------------------------
+
+/// Check if a cached rollup covers a query and return re-aggregation SQL.
+///
+/// # Arguments
+/// - `manifest_json`: The local manifest JSON (from `cache_build_manifest` or IndexedDB)
+/// - `query_json`: The query as JSON (same format as `airlayer query -q`)
+///
+/// # Returns
+/// JSON object with `reagg_sql`, `cache_key`, and `entry` fields if a rollup
+/// covers the query. Returns `null` if no rollup matches.
+///
+/// The `reagg_sql` reads from a table named `"__cache"` — the JS caller must
+/// create this table in duckdb-wasm with the cached rollup data before executing.
+#[wasm_bindgen]
+pub fn cache_resolve(manifest_json: &str, query_json: &str) -> Result<JsValue, JsValue> {
+    let manifest: preagg::LocalManifest = serde_json::from_str(manifest_json)
+        .map_err(|e| JsValue::from_str(&format!("Invalid manifest JSON: {}", e)))?;
+
+    let request: QueryRequest = serde_json::from_str(query_json)
+        .map_err(|e| JsValue::from_str(&format!("Invalid query JSON: {}", e)))?;
+
+    match preagg::resolve_cached(&request, &manifest) {
+        Some(resolution) => {
+            serde_wasm_bindgen::to_value(&resolution).map_err(|e| JsValue::from_str(&e.to_string()))
+        }
+        None => Ok(JsValue::NULL),
+    }
+}
+
+/// Parse warehouse manifest rows into a local manifest JSON string.
+///
+/// # Arguments
+/// - `rows_json`: JSON array of manifest rows from the warehouse `__manifest` table.
+///   Each row is an object with fields: `view_name`, `rollup_name`, `rollup_hash`,
+///   `table_name`, `dimensions`, `measures`, `time_dimension`, `granularity`, `build_date`.
+/// - `source_database`: Name of the source database (for metadata).
+///
+/// # Returns
+/// A JSON string representing the `LocalManifest`, ready to be stored in IndexedDB
+/// and passed to `cache_resolve`.
+#[wasm_bindgen]
+pub fn cache_build_manifest(rows_json: &str, source_database: &str) -> Result<String, JsValue> {
+    let rows: Vec<serde_json::Map<String, serde_json::Value>> = serde_json::from_str(rows_json)
+        .map_err(|e| JsValue::from_str(&format!("Invalid rows JSON: {}", e)))?;
+
+    let warehouse_entries = preagg::parse_manifest_rows(&rows);
+
+    let local_entries: Vec<preagg::LocalRollupEntry> = warehouse_entries
+        .iter()
+        .map(|e| {
+            let mut local = e.to_local_entry();
+            local.file = format!("{}__{}", e.view_name, e.rollup_hash);
+            local
+        })
+        .collect();
+
+    let manifest = preagg::LocalManifest {
+        pulled_at: String::new(), // JS caller can set this
+        source_database: source_database.to_string(),
+        rollups: local_entries,
+    };
+
+    serde_json::to_string(&manifest)
+        .map_err(|e| JsValue::from_str(&format!("Failed to serialize manifest: {}", e)))
+}
+
+/// Get the cache key for a warehouse rollup entry.
+///
+/// # Arguments
+/// - `view_name`: The view name
+/// - `rollup_hash`: The rollup hash
+///
+/// # Returns
+/// The cache key string (e.g., `"events__a1b2c3d4"`), used as the IndexedDB key.
+#[wasm_bindgen]
+pub fn cache_key(view_name: &str, rollup_hash: &str) -> String {
+    format!("{}__{}", view_name, rollup_hash)
+}
+
+/// Resolve a query against warehouse rollup entries (for Layer 2 cache).
+///
+/// # Arguments
+/// - `rows_json`: JSON array of manifest rows from the warehouse
+/// - `query_json`: The query as JSON
+/// - `schema`: The pre-aggregation schema name
+/// - `dialect`: SQL dialect string
+///
+/// # Returns
+/// JSON object with `reagg_sql` and `table_name` if a warehouse rollup covers
+/// the query. Returns `null` if no rollup matches.
+#[wasm_bindgen]
+pub fn cache_resolve_warehouse(
+    rows_json: &str,
+    query_json: &str,
+    schema: &str,
+    dialect: &str,
+) -> Result<JsValue, JsValue> {
+    let rows: Vec<serde_json::Map<String, serde_json::Value>> = serde_json::from_str(rows_json)
+        .map_err(|e| JsValue::from_str(&format!("Invalid rows JSON: {}", e)))?;
+
+    let request: QueryRequest = serde_json::from_str(query_json)
+        .map_err(|e| JsValue::from_str(&format!("Invalid query JSON: {}", e)))?;
+
+    let resolved_dialect = Dialect::from_str(dialect)
+        .ok_or_else(|| JsValue::from_str(&format!("Unknown dialect: {}", dialect)))?;
+
+    let entries = preagg::parse_manifest_rows(&rows);
+
+    match preagg::resolve_warehouse(&request, &entries, schema, &resolved_dialect) {
+        Some(preagg::PreaggResolution::WarehouseRollup {
+            reagg_sql,
+            table_name,
+        }) => {
+            let result = serde_json::json!({
+                "reagg_sql": reagg_sql,
+                "table_name": table_name,
+            });
+            serde_wasm_bindgen::to_value(&result).map_err(|e| JsValue::from_str(&e.to_string()))
+        }
+        _ => Ok(JsValue::NULL),
+    }
 }

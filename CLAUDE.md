@@ -43,12 +43,13 @@ cargo test --features exec -- --include-ignored      # tier 1 + 2 + 3
 
 Full testing guide: **[docs/testing.md](docs/testing.md)**
 
-### Current test counts (222 total)
+### Current test counts (302 total)
 
 | Category | Count | What |
 |----------|-------|------|
-| Unit tests | 140 | SQL generation, profiling, joins, parsing, motifs, inline_params escaping |
-| Tier 1 integration | 32 | DuckDB (12), SQLite (7), parse validation (4), motif compile (4), custom motif (2), saved query (3) |
+| Unit tests | 152 | SQL generation, profiling, joins, parsing, motifs, inline_params escaping |
+| Preagg unit tests | 59 | Hashing, rollup resolution, coverage, re-aggregation SQL, all-dialects build/manifest/reagg, filter rendering, ORDER BY, LIKE escaping, library API |
+| Tier 1 integration | 41 | DuckDB (12), SQLite (7), parse validation (4), motif compile (4), custom motif (3), saved query (2), preagg (9) |
 | Tier 2 integration | 21 | Postgres (5), MySQL (2), ClickHouse (5), Presto (9) — all self-seeding |
 | Tier 3 integration | 29 | Snowflake (6), BigQuery (7), Databricks (8), MotherDuck (8) — all self-seeding |
 
@@ -141,6 +142,9 @@ exec            = all of the above
 - **SQL param escaping**: All `inline_params` functions escape `'` as `''` (SQL standard doubled-quote). Never use `\'` (non-standard backslash).
 - **Motif CTE wrapping**: Motifs compile the base query as `WITH __base AS (...)`, then add window-function columns in the outer SELECT. Complex motifs (anomaly, trend) use multi-stage CTEs (`__base → __stage1 → final`). Params of type `measure`/`dimension` auto-bind only when unambiguous (exactly one column of that kind); with multiple measures, the user must pass explicit `motif_params` using semantic member names. In multi-stage CTEs, final-stage expressions reference the `s.` alias (stage), not `b.` (base).
 - **Saved queries are referenced by filepath**: Saved queries are defined as `.query.yml` files in the `queries/` directory. They support both single-step (inline query fields) and multi-step (with `steps`) formats. Saved queries are referenced by their file path (e.g., `airlayer query queries/revenue.query.yml`), not by a global name. The `name` field is a display label only. Saved queries are parsed and validated at load time; each step can be compiled to SQL independently.
+- **Pre-aggregation three-tier resolution**: When `--execute` is used, queries check (1) local Parquet cache via DuckDB, (2) warehouse `__manifest` pre-agg tables, (3) raw SQL, in that order. `--no-cache` skips layers 1 and 2.
+- **WASM cache API**: `resolve_cached()` returns a `CachedResolution` with reagg SQL reading from `"__cache"` (filesystem-independent). WASM bindings in `src/wasm.rs` expose `cache_resolve`, `cache_build_manifest`, `cache_key`, `cache_resolve_warehouse` for browser use with IndexedDB + duckdb-wasm.
+- **Rollup column strategy**: SUM/COUNT/MIN/MAX store aggregated columns. AVG stores SUM+COUNT for recomputation. COUNT_DISTINCT stores raw expr column (GROUP BY it). MEDIAN stores raw expr + freq column. Custom measures are not pre-aggregable.
 
 ## Motifs
 
@@ -266,6 +270,9 @@ steps:
 - `query <file>`: compile a saved query file (all steps to SQL), e.g. `airlayer query queries/revenue.query.yml`
 - `query <file> -x`: execute a saved query file against the database
 - `convert --format <fmt> <path>`: convert foreign semantic models to airlayer .view.yml format. Formats: `cube`, `lookml`, `dbt`, `omni`. Use `--output` to set output directory, `--stdout` to print YAML, `--dialect` to set dialect on generated views.
+- `build`: pre-aggregate views into warehouse rollup tables. `--schema` (default AIRLAYER), `--database`, `--view`, `--dry-run`.
+- `pull`: download pre-aggregated data to local `.airlayer/cache/` as Parquet files. `--schema`, `--database`, `--view`.
+- `query --no-cache`: bypass pre-aggregation cache layers, execute raw SQL directly.
 
 ## Foreign semantic model support
 
@@ -281,14 +288,14 @@ airlayer convert --format cube ./cube_schema/ --output ./views/
 airlayer convert --format lookml ./models/orders.lkml --stdout
 ```
 
-Auto-detection order: LookML (`.lkml` extension) → Cube.js (`cubes:` key) → dbt (`semantic_models:` key) → Omni (`views:` key). Native `.view.yml` files always take priority.
+Auto-detection order: LookML (`.lkml` extension) → Omni directory format → Cube.js (`cubes:` key) → dbt (`semantic_models:` key) → Omni legacy (`views:` + `topics:` keys). Native `.view.yml` files always take priority.
 
 Parsers live in `src/schema/foreign/` with per-format modules: `cube.rs`, `lookml.rs`, `dbt.rs`, `omni.rs`. The `ForeignFormat` enum dispatches conversion. All parsers produce airlayer `View` types that can be compiled to SQL immediately. See **[docs/foreign-models.md](docs/foreign-models.md)** for full documentation.
 
 ### Testing foreign model parsers
 
 ```bash
-cargo test --lib schema::foreign       # unit tests (39 tests)
+cargo test --lib schema::foreign       # unit tests (59 tests)
 just test-cube-parity                  # Cube.js Docker parity tests (tier 2)
 ```
 

@@ -153,6 +153,7 @@ impl SchemaParser {
             dimensions,
             measures,
             segments: raw.segments,
+            pre_aggregations: raw.pre_aggregations,
             meta: raw.meta,
         })
     }

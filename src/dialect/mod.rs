@@ -186,6 +186,46 @@ impl Dialect {
         )
     }
 
+    /// CAST expression to a double/float type for this dialect.
+    pub fn cast_to_double(&self, expr: &str) -> String {
+        match self {
+            Dialect::Postgres | Dialect::Redshift => {
+                format!("CAST({} AS DOUBLE PRECISION)", expr)
+            }
+            Dialect::ClickHouse => format!("CAST({} AS Float64)", expr),
+            Dialect::BigQuery => format!("CAST({} AS FLOAT64)", expr),
+            Dialect::MySQL | Dialect::Domo => format!("CAST({} AS DECIMAL(38,10))", expr),
+            _ => format!("CAST({} AS DOUBLE)", expr), // Snowflake, DuckDB, Databricks, Presto, SQLite
+        }
+    }
+
+    /// Build a fully-qualified table name with proper quoting for each part.
+    /// E.g. `"preagg"."events__abc123__20260415"` for Postgres,
+    ///      `\`preagg\`.\`events__abc123__20260415\`` for BigQuery.
+    pub fn qualify_table(&self, schema: &str, table: &str) -> String {
+        format!(
+            "{}.{}",
+            self.quote_identifier(schema),
+            self.quote_identifier(table)
+        )
+    }
+
+    /// DDL to create the pre-aggregation schema/database, or None if not needed.
+    pub fn create_schema_ddl(&self, schema: &str) -> Option<String> {
+        match self {
+            Dialect::ClickHouse => Some(format!(
+                "CREATE DATABASE IF NOT EXISTS {}",
+                self.quote_identifier(schema)
+            )),
+            // BigQuery datasets are created externally; CTAS into an existing dataset works fine.
+            Dialect::BigQuery => None,
+            _ => Some(format!(
+                "CREATE SCHEMA IF NOT EXISTS {}",
+                self.quote_identifier(schema)
+            )),
+        }
+    }
+
     #[allow(clippy::should_implement_trait)]
     pub fn from_str(s: &str) -> Option<Dialect> {
         match s.to_lowercase().as_str() {

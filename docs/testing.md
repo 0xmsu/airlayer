@@ -6,7 +6,7 @@ airlayer uses a three-tier testing strategy.
 
 ```bash
 cargo test                                           # tier 1 only (no external deps)
-cargo test --features exec                           # tier 1 + executor compilation check (136 unit tests)
+cargo test --features exec                           # tier 1 + executor compilation check (211 unit tests)
 
 # Start tier 2 databases
 docker compose -f docker-compose.test.yml up -d
@@ -66,7 +66,7 @@ BIGQUERY_ACCESS_TOKEN=$(gcloud auth print-access-token) cargo test --features ex
 
 ## Tier 1: Unit + in-process tests
 
-**136 unit tests** across `src/engine/sql_generator.rs`, `src/engine/join_graph.rs`, `src/schema/parser.rs`, `src/engine/profiler.rs`, and `src/executor/` cover SQL generation and execution logic:
+**211 unit tests** across `src/engine/sql_generator.rs`, `src/engine/preagg.rs`, `src/engine/join_graph.rs`, `src/schema/parser.rs`, `src/engine/profiler.rs`, and `src/executor/` cover SQL generation, pre-aggregation, and execution logic:
 
 - Basic SELECT/FROM/GROUP BY generation
 - All filter operators (equals, contains, gt, set, date ranges, etc.)
@@ -100,9 +100,10 @@ BIGQUERY_ACCESS_TOKEN=$(gcloud auth print-access-token) cargo test --features ex
 
 **In-process integration tests** (`tests/integration_tests.rs`) run generated SQL against embedded databases:
 
-- **DuckDB** (4 tests): Standard query, segment, unfiltered, measure value correctness
-- **SQLite** (4 tests): Standard query, segment, unfiltered, measure value correctness
+- **DuckDB** (12 tests): Standard query, segment, unfiltered, measure value correctness, motifs, time dimensions
+- **SQLite** (7 tests): Standard query, segment, unfiltered, measure value correctness, motifs
 - **Parse-validation** (4 tests): Validates generated SQL parses correctly for BigQuery, Snowflake, Databricks, Redshift
+- **Pre-aggregation** (9 tests): Rollup resolution, CTAS build, manifest roundtrip, re-aggregation correctness (sum/count by platform, count_distinct, time dimension), idempotent rebuild, coverage checking
 
 ## Tier 2: Docker-based integration tests
 
@@ -143,6 +144,7 @@ cargo test --features exec -- --include-ignored
 - **Postgres** (2 tests): Standard and unfiltered queries
 - **MySQL** (1 test): Standard query
 - **ClickHouse** (2 tests): Standard and unfiltered queries
+- **Pre-aggregation / ClickHouse** (7 tests): Build rollup table, manifest roundtrip, coverage check, re-aggregation (sum/count by platform, count_distinct, time dimension), rollup data correctness
 - **Presto/Trino** (9 tests): Seed, standard query, unfiltered, contribution motif, rank motif, time dimension (DATE_TRUNC), anomaly motif (STDDEV_POP), error handling, config deserialization
 
 ### Teardown
