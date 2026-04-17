@@ -306,19 +306,16 @@ pub fn cache_resolve_warehouse(
     let entries = preagg::parse_manifest_rows(&rows);
 
     match preagg::resolve_warehouse(&request, &entries, schema, &resolved_dialect) {
-        Some(resolution) => {
+        Some(preagg::PreaggResolution::WarehouseRollup {
+            reagg_sql,
+            table_name,
+        }) => {
             let result = serde_json::json!({
-                "reagg_sql": match &resolution {
-                    preagg::PreaggResolution::WarehouseRollup { reagg_sql, .. } => reagg_sql,
-                    _ => unreachable!(),
-                },
-                "table_name": match &resolution {
-                    preagg::PreaggResolution::WarehouseRollup { table_name, .. } => table_name,
-                    _ => unreachable!(),
-                },
+                "reagg_sql": reagg_sql,
+                "table_name": table_name,
             });
             serde_wasm_bindgen::to_value(&result).map_err(|e| JsValue::from_str(&e.to_string()))
         }
-        None => Ok(JsValue::NULL),
+        _ => Ok(JsValue::NULL),
     }
 }

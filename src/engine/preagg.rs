@@ -747,7 +747,7 @@ fn is_coarser_or_equal(requested: &str, stored: &str) -> bool {
 pub fn generate_reagg_sql(
     request: &crate::engine::query::QueryRequest,
     entry: &LocalRollupEntry,
-    parquet_path: &str,
+    from_source: &str,
 ) -> String {
     let mut select_cols: Vec<String> = Vec::new();
     let mut group_by_cols: Vec<String> = Vec::new();
@@ -902,8 +902,7 @@ pub fn generate_reagg_sql(
         .unwrap_or_default();
 
     format!(
-        "SELECT {select}\nFROM read_parquet('{path}'){where_clause}{group_by}{order_by}{limit}{offset}",
-        path = parquet_path.replace('\'', "''"),
+        "SELECT {select}\nFROM {from_source}{where_clause}{group_by}{order_by}{limit}{offset}",
     )
 }
 
@@ -1268,7 +1267,8 @@ pub fn resolve_local(
         return None;
     }
     let parquet_str = parquet_path.to_str()?;
-    let reagg_sql = generate_reagg_sql(request, entry, parquet_str);
+    let from_source = format!("read_parquet('{}')", parquet_str.replace('\'', "''"));
+    let reagg_sql = generate_reagg_sql(request, entry, &from_source);
     Some(PreaggResolution::LocalParquet {
         reagg_sql,
         parquet_path: parquet_str.to_string(),
@@ -1306,10 +1306,7 @@ pub fn resolve_cached(
 ) -> Option<CachedResolution> {
     let entry = check_coverage(request, &manifest.rollups)?;
     let cache_key = format!("{}__{}", entry.view_name, entry.rollup_hash);
-    let reagg_sql = generate_reagg_sql(request, entry, "__cache");
-    // The generated SQL will have: FROM read_parquet('__cache')
-    // Replace with a plain table reference for in-memory use
-    let reagg_sql = reagg_sql.replace("read_parquet('__cache')", "\"__cache\"");
+    let reagg_sql = generate_reagg_sql(request, entry, "\"__cache\"");
     Some(CachedResolution {
         reagg_sql,
         cache_key,
@@ -1815,7 +1812,7 @@ mod tests {
             dimensions: vec!["orders.region".to_string()],
             ..QueryRequest::new()
         };
-        let sql = generate_reagg_sql(&request, &entry, "/data/orders.parquet");
+        let sql = generate_reagg_sql(&request, &entry, "read_parquet('/data/orders.parquet')");
         assert!(
             sql.contains("read_parquet('/data/orders.parquet')"),
             "Missing FROM: {}",
@@ -1847,7 +1844,7 @@ mod tests {
             }],
             ..QueryRequest::new()
         };
-        let sql = generate_reagg_sql(&request, &entry, "/data/orders.parquet");
+        let sql = generate_reagg_sql(&request, &entry, "read_parquet('/data/orders.parquet')");
         // Same granularity: should select the stored column directly, no date_trunc
         assert!(
             sql.contains("\"created_at__month\""),
@@ -1874,7 +1871,7 @@ mod tests {
             }],
             ..QueryRequest::new()
         };
-        let sql = generate_reagg_sql(&request, &entry, "/data/orders.parquet");
+        let sql = generate_reagg_sql(&request, &entry, "read_parquet('/data/orders.parquet')");
         // Coarser granularity: should apply date_trunc over the stored monthly column
         assert!(
             sql.contains("date_trunc('year', \"created_at__month\")"),
@@ -1896,7 +1893,7 @@ mod tests {
             }],
             ..QueryRequest::new()
         };
-        let sql = generate_reagg_sql(&request, &entry, "/data/orders.parquet");
+        let sql = generate_reagg_sql(&request, &entry, "read_parquet('/data/orders.parquet')");
         // No requested gran: should fall back to the stored truncated column, not bare "created_at"
         assert!(
             sql.contains("\"created_at__month\""),
@@ -1917,7 +1914,7 @@ mod tests {
             measures: vec!["orders.total_revenue".to_string()],
             ..QueryRequest::new()
         };
-        let sql = generate_reagg_sql(&request, &entry, "/data/it's_here.parquet");
+        let sql = generate_reagg_sql(&request, &entry, "read_parquet('/data/it''s_here.parquet')");
         assert!(
             sql.contains("it''s_here"),
             "Single quote should be escaped: {}",
@@ -1934,7 +1931,7 @@ mod tests {
             offset: Some(20),
             ..QueryRequest::new()
         };
-        let sql = generate_reagg_sql(&request, &entry, "/data/orders.parquet");
+        let sql = generate_reagg_sql(&request, &entry, "read_parquet('/data/orders.parquet')");
         assert!(sql.contains("LIMIT 100"), "Missing LIMIT: {}", sql);
         assert!(sql.contains("OFFSET 20"), "Missing OFFSET: {}", sql);
     }
@@ -2104,7 +2101,7 @@ mod tests {
             }],
             ..QueryRequest::new()
         };
-        let sql = generate_reagg_sql(&request, &entry, "/data/orders.parquet");
+        let sql = generate_reagg_sql(&request, &entry, "read_parquet('/data/orders.parquet')");
         assert!(
             sql.contains("WHERE \"region\" = 'US'"),
             "Missing WHERE clause: {}",
@@ -2296,7 +2293,7 @@ mod tests {
             limit: Some(10),
             ..QueryRequest::new()
         };
-        let sql = generate_reagg_sql(&request, &entry, "/data/orders.parquet");
+        let sql = generate_reagg_sql(&request, &entry, "read_parquet('/data/orders.parquet')");
         assert!(
             sql.contains("ORDER BY \"orders__total_revenue\" DESC"),
             "Missing ORDER BY: {}",
