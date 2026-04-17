@@ -943,10 +943,7 @@ pub fn extract_dbt_connection(dir: &std::path::Path) -> BTreeMap<String, String>
         .get("target")
         .and_then(|v| v.as_str())
         .unwrap_or("dev");
-    let target = match profile
-        .get("outputs")
-        .and_then(|o| o.get(target_name))
-    {
+    let target = match profile.get("outputs").and_then(|o| o.get(target_name)) {
         Some(t) => t,
         None => return info,
     };
@@ -1288,10 +1285,22 @@ my_profile:
     fn test_field_default() {
         assert_eq!(field_default("postgres", "host"), Some("localhost"));
         assert_eq!(field_default("postgres", "port"), Some("5432"));
-        assert_eq!(field_default("postgres", "password_var"), Some("PG_PASSWORD"));
-        assert_eq!(field_default("snowflake", "password_var"), Some("SNOWFLAKE_PASSWORD"));
-        assert_eq!(field_default("bigquery", "access_token_var"), Some("BIGQUERY_ACCESS_TOKEN"));
-        assert_eq!(field_default("databricks", "token_var"), Some("DATABRICKS_TOKEN"));
+        assert_eq!(
+            field_default("postgres", "password_var"),
+            Some("PG_PASSWORD")
+        );
+        assert_eq!(
+            field_default("snowflake", "password_var"),
+            Some("SNOWFLAKE_PASSWORD")
+        );
+        assert_eq!(
+            field_default("bigquery", "access_token_var"),
+            Some("BIGQUERY_ACCESS_TOKEN")
+        );
+        assert_eq!(
+            field_default("databricks", "token_var"),
+            Some("DATABRICKS_TOKEN")
+        );
         assert_eq!(field_default("postgres", "database"), None);
     }
 

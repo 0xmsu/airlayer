@@ -383,7 +383,12 @@ pub fn convert_directory(dir: &std::path::Path) -> Result<ConversionResult, Stri
 
     // Apply all explores to the aggregated views
     for (explore_name, explore_fields) in &all_explores {
-        apply_explore_joins(&mut all_views, explore_name, explore_fields, &mut all_warnings);
+        apply_explore_joins(
+            &mut all_views,
+            explore_name,
+            explore_fields,
+            &mut all_warnings,
+        );
     }
 
     if all_views.is_empty() && !all_warnings.is_empty() {
@@ -613,7 +618,7 @@ fn convert_lookml_dimension(
             &duration_sql,
             original,
             desc.as_deref(),
-            &[],    // timeframes not used for duration
+            &[], // timeframes not used for duration
             &ivs,
         );
     }

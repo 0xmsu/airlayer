@@ -2645,7 +2645,12 @@ fn run_init_foreign(
             ForeignFormat::Cube => ".env",
             _ => "repo files",
         };
-        let field_count = extracted.len() - if extracted.contains_key("db_type") { 1 } else { 0 };
+        let field_count = extracted.len()
+            - if extracted.contains_key("db_type") {
+                1
+            } else {
+                0
+            };
         if field_count > 0 {
             println!(
                 "  {} Found {} connection fields from {}",
@@ -2697,23 +2702,21 @@ fn run_init_foreign(
 /// Count the number of views in a foreign model directory (best-effort, for display only).
 fn count_foreign_views(format: ForeignFormat, dir: &Path) -> usize {
     match format {
-        ForeignFormat::LookML => {
-            glob::glob(dir.join("**/*.lkml").to_str().unwrap_or(""))
-                .ok()
-                .map(|paths| paths.filter_map(|p| p.ok()).count())
-                .unwrap_or(0)
-        }
-        ForeignFormat::Omni => {
-            glob::glob(dir.join("**/*.view.yaml").to_str().unwrap_or(""))
-                .ok()
-                .map(|paths| paths.filter_map(|p| p.ok()).count())
-                .unwrap_or(0)
-        }
+        ForeignFormat::LookML => glob::glob(dir.join("**/*.lkml").to_str().unwrap_or(""))
+            .ok()
+            .map(|paths| paths.filter_map(|p| p.ok()).count())
+            .unwrap_or(0),
+        ForeignFormat::Omni => glob::glob(dir.join("**/*.view.yaml").to_str().unwrap_or(""))
+            .ok()
+            .map(|paths| paths.filter_map(|p| p.ok()).count())
+            .unwrap_or(0),
         ForeignFormat::Cube => {
             // Count YAML files that contain 'cubes:' key
             let mut count = 0;
             for ext in &["yml", "yaml"] {
-                if let Ok(paths) = glob::glob(dir.join(format!("**/*.{}", ext)).to_str().unwrap_or("")) {
+                if let Ok(paths) =
+                    glob::glob(dir.join(format!("**/*.{}", ext)).to_str().unwrap_or(""))
+                {
                     for path in paths.flatten() {
                         if let Ok(content) = std::fs::read_to_string(&path) {
                             if content.lines().any(|l| l.starts_with("cubes:")) {
@@ -2729,7 +2732,9 @@ fn count_foreign_views(format: ForeignFormat, dir: &Path) -> usize {
             // Count YAML files that contain 'semantic_models:' key
             let mut count = 0;
             for ext in &["yml", "yaml"] {
-                if let Ok(paths) = glob::glob(dir.join(format!("**/*.{}", ext)).to_str().unwrap_or("")) {
+                if let Ok(paths) =
+                    glob::glob(dir.join(format!("**/*.{}", ext)).to_str().unwrap_or(""))
+                {
                     for path in paths.flatten() {
                         if let Ok(content) = std::fs::read_to_string(&path) {
                             if content.lines().any(|l| l.starts_with("semantic_models:")) {

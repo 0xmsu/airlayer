@@ -1565,7 +1565,11 @@ measures:
         assert_eq!(result.views.len(), 1);
         let view = &result.views[0];
 
-        let hired = view.measures_list().iter().find(|m| m.name == "hired_count").unwrap();
+        let hired = view
+            .measures_list()
+            .iter()
+            .find(|m| m.name == "hired_count")
+            .unwrap();
         let filters = hired.filters.as_ref().expect("Should have filters");
         assert_eq!(filters.len(), 1);
         assert!(
@@ -1574,7 +1578,11 @@ measures:
             filters[0].expr
         );
 
-        let not_hired = view.measures_list().iter().find(|m| m.name == "not_hired_count").unwrap();
+        let not_hired = view
+            .measures_list()
+            .iter()
+            .find(|m| m.name == "not_hired_count")
+            .unwrap();
         let filters = not_hired.filters.as_ref().expect("Should have filters");
         assert!(
             filters[0].expr.contains("is_hired"),
@@ -1605,7 +1613,11 @@ measures:
 "#;
         let result = convert(yaml, "events.view.yaml").unwrap();
         let view = &result.views[0];
-        let m = view.measures_list().iter().find(|m| m.name == "big_completed_count").unwrap();
+        let m = view
+            .measures_list()
+            .iter()
+            .find(|m| m.name == "big_completed_count")
+            .unwrap();
         let filters = m.filters.as_ref().expect("Should have filters");
         assert_eq!(filters.len(), 2);
     }
@@ -1628,13 +1640,25 @@ dimensions:
         let result = convert(yaml, "users.view.yaml").unwrap();
         let view = &result.views[0];
 
-        let created = view.dimensions.iter().find(|d| d.name == "created_at").unwrap();
+        let created = view
+            .dimensions
+            .iter()
+            .find(|d| d.name == "created_at")
+            .unwrap();
         assert_eq!(created.dimension_type, DimensionType::Datetime);
 
-        let is_active = view.dimensions.iter().find(|d| d.name == "is_active").unwrap();
+        let is_active = view
+            .dimensions
+            .iter()
+            .find(|d| d.name == "is_active")
+            .unwrap();
         assert_eq!(is_active.dimension_type, DimensionType::Boolean);
 
-        let has_email = view.dimensions.iter().find(|d| d.name == "has_email").unwrap();
+        let has_email = view
+            .dimensions
+            .iter()
+            .find(|d| d.name == "has_email")
+            .unwrap();
         assert_eq!(has_email.dimension_type, DimensionType::Boolean);
 
         let name = view.dimensions.iter().find(|d| d.name == "name").unwrap();
@@ -1893,7 +1917,9 @@ dimensions:
             ],
             ..QueryRequest::new()
         };
-        let result = engine.compile_query(&request).expect("Dimension-only query should compile");
+        let result = engine
+            .compile_query(&request)
+            .expect("Dimension-only query should compile");
         eprintln!("Dimension-only SQL:\n{}", result.sql);
         assert!(result.sql.contains("SELECT"));
         assert!(result.sql.contains("dbt_prod_fpx.ax_dim_applicants"));
@@ -1901,12 +1927,12 @@ dimensions:
         // 2. Measure query (count grouped by dimension)
         let request = QueryRequest {
             measures: vec!["dbt_prod_fpx__ax_dim_applicants.count".to_string()],
-            dimensions: vec![
-                "dbt_prod_fpx__ax_dim_applicants.current_stage_name".to_string(),
-            ],
+            dimensions: vec!["dbt_prod_fpx__ax_dim_applicants.current_stage_name".to_string()],
             ..QueryRequest::new()
         };
-        let result = engine.compile_query(&request).expect("Measure query should compile");
+        let result = engine
+            .compile_query(&request)
+            .expect("Measure query should compile");
         eprintln!("Measure SQL:\n{}", result.sql);
         assert!(result.sql.contains("COUNT("));
         assert!(result.sql.contains("GROUP BY"));

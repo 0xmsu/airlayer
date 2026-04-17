@@ -599,10 +599,7 @@ fn lookml_sales_filtered_measure() {
         .iter()
         .find(|m| m.name == "win_count")
         .expect("Should have win_count measure");
-    assert!(
-        win_count.filters.is_some(),
-        "win_count should have filters"
-    );
+    assert!(win_count.filters.is_some(), "win_count should have filters");
 
     let total_pipeline = measures
         .iter()
@@ -709,10 +706,7 @@ fn lookml_healthcare_sql_join_correctness() {
             "encounter.count".to_string(),
             "encounter.total_cost".to_string(),
         ],
-        dimensions: vec![
-            "patient.gender".to_string(),
-            "patient.city".to_string(),
-        ],
+        dimensions: vec!["patient.gender".to_string(), "patient.city".to_string()],
         ..QueryRequest::new()
     };
     let result = engine.compile_query(&request).unwrap();
@@ -829,11 +823,21 @@ fn lookml_sql_quality_check() {
         (
             "healthcare",
             QueryRequest {
-                measures: vec!["encounter.count".to_string(), "encounter.total_cost".to_string()],
+                measures: vec![
+                    "encounter.count".to_string(),
+                    "encounter.total_cost".to_string(),
+                ],
                 dimensions: vec!["encounter.encounter_class".to_string()],
                 ..QueryRequest::new()
             },
-            vec!["SELECT", "COUNT", "SUM", "GROUP BY", "encounter_class", "total_claim_cost"],
+            vec![
+                "SELECT",
+                "COUNT",
+                "SUM",
+                "GROUP BY",
+                "encounter_class",
+                "total_claim_cost",
+            ],
         ),
         (
             "jira",
@@ -856,7 +860,10 @@ fn lookml_sql_quality_check() {
         (
             "google_ads",
             QueryRequest {
-                measures: vec!["ad_impressions.total_impressions".to_string(), "ad_impressions.total_clicks".to_string()],
+                measures: vec![
+                    "ad_impressions.total_impressions".to_string(),
+                    "ad_impressions.total_clicks".to_string(),
+                ],
                 dimensions: vec!["ad_impressions.ad_network_type1".to_string()],
                 ..QueryRequest::new()
             },
