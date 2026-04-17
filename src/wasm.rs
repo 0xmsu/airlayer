@@ -201,7 +201,7 @@ pub fn catalog_list(
 /// Check if a cached rollup covers a query and return re-aggregation SQL.
 ///
 /// # Arguments
-/// - `manifest_json`: The local manifest JSON (from `cache_store_manifest` or IndexedDB)
+/// - `manifest_json`: The local manifest JSON (from `cache_build_manifest` or IndexedDB)
 /// - `query_json`: The query as JSON (same format as `airlayer query -q`)
 ///
 /// # Returns

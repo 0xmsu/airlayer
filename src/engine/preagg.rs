@@ -743,7 +743,7 @@ fn is_coarser_or_equal(requested: &str, stored: &str) -> bool {
     }
 }
 
-/// Generate a DuckDB SQL query that reads from a Parquet file and re-aggregates.
+/// Generate a re-aggregation SQL query from a pre-aggregated source.
 pub fn generate_reagg_sql(
     request: &crate::engine::query::QueryRequest,
     entry: &LocalRollupEntry,
@@ -901,9 +901,7 @@ pub fn generate_reagg_sql(
         .map(|o| format!("\nOFFSET {}", o))
         .unwrap_or_default();
 
-    format!(
-        "SELECT {select}\nFROM {from_source}{where_clause}{group_by}{order_by}{limit}{offset}",
-    )
+    format!("SELECT {select}\nFROM {from_source}{where_clause}{group_by}{order_by}{limit}{offset}")
 }
 
 /// Generate a dialect-aware SQL query that reads from a pre-aggregated warehouse table.
