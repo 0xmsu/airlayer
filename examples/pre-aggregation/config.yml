@@ -1,0 +1,8 @@
+databases:
+  - name: warehouse
+    type: duckdb
+    path: ./data/warehouse.duckdb
+
+pre_aggregations:
+  schema: preagg
+  database: warehouse

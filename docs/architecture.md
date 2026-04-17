@@ -95,6 +95,18 @@ When `--execute` is passed, the compiled SQL is dispatched to a real database vi
 
 Results are wrapped in a `QueryEnvelope` — a structured JSON object with status, SQL, column metadata, data (capped at 50 rows), and error context. See [agent-execution.md](agent-execution.md) for the full spec.
 
+### 6. Pre-aggregation (`engine/preagg.rs` — optional)
+
+When views declare `pre_aggregations`, airlayer can materialize rollup tables in the warehouse and cache them locally as Parquet files. On `--execute`, queries are resolved through a three-tier cache:
+
+1. **Local Parquet cache** — `.airlayer/cache/*.parquet` queried via DuckDB (instant)
+2. **Warehouse rollup tables** — `AIRLAYER.__manifest` + rollup tables in the warehouse
+3. **Raw SQL** — fallback to the original table
+
+The `build` command creates rollup tables (CTAS with GROUP BY), the `pull` command downloads them to local Parquet, and `--no-cache` bypasses both layers. Coverage checking determines whether a rollup can satisfy a query based on available dimensions, measures, granularity, and filters. Re-aggregation SQL is generated with dialect-aware quoting, date truncation, and type casting.
+
+See [pre-aggregation.md](pre-aggregation.md) for the full guide.
+
 ## Module map
 
 ```
@@ -107,6 +119,7 @@ src/
 │   ├── evaluator.rs        Schema indexing and member lookup
 │   ├── join_graph.rs       Entity relationship graph (petgraph + BFS)
 │   ├── member_sql.rs       Expression reference resolution ({{entity.field}}, {{TABLE}}, etc.)
+│   ├── preagg.rs           Pre-aggregation: rollup resolution, coverage, re-aggregation SQL
 │   ├── query.rs            Request/response types, filter operators
 │   ├── sql_generator.rs    SQL generation pipeline
 │   └── error.rs            Error types

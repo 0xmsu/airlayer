@@ -1,0 +1,57 @@
+name: events
+description: "Web analytics events — 1M rows for pre-aggregation demo"
+dialect: duckdb
+datasource: warehouse
+table: events
+
+dimensions:
+  - name: event_type
+    type: string
+    expr: event_type
+
+  - name: platform
+    type: string
+    expr: platform
+
+  - name: country
+    type: string
+    expr: country
+
+  - name: created_at
+    type: datetime
+    expr: created_at
+
+measures:
+  - name: event_count
+    type: count
+
+  - name: total_revenue
+    type: sum
+    expr: revenue_cents / 100.0
+
+  - name: avg_revenue
+    type: average
+    expr: revenue_cents / 100.0
+
+  - name: unique_users
+    type: count_distinct
+    expr: user_id
+
+  - name: max_revenue
+    type: max
+    expr: revenue_cents / 100.0
+
+pre_aggregations:
+  # 3 platforms × 365 days = 1,095 rows (vs 1M raw)
+  - name: by_platform_daily
+    dimensions: [platform]
+    measures: [event_count, total_revenue, avg_revenue, max_revenue]
+    time_dimension: created_at
+    granularity: day
+
+  # 6 countries × 12 months = 72 rows (vs 1M raw)
+  - name: by_country_monthly
+    dimensions: [country]
+    measures: [event_count, total_revenue]
+    time_dimension: created_at
+    granularity: month

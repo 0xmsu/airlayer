@@ -1,0 +1,34 @@
+name: events
+description: "Events with pre-aggregation for testing"
+table: analytics.events
+
+dimensions:
+  - name: event_id
+    type: string
+    expr: event_id
+  - name: event_type
+    type: string
+    expr: event_type
+  - name: platform
+    type: string
+    expr: platform
+  - name: created_at
+    type: datetime
+    expr: created_at
+
+measures:
+  - name: total_events
+    type: count
+  - name: total_revenue
+    type: sum
+    expr: revenue_cents / 100.0
+  - name: unique_users
+    type: count_distinct
+    expr: user_id
+
+pre_aggregations:
+  - name: by_platform_daily
+    dimensions: [platform]
+    measures: [total_events, total_revenue, unique_users]
+    time_dimension: created_at
+    granularity: day

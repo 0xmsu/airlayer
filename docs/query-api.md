@@ -211,6 +211,18 @@ airlayer query -q '{
 echo '{"dimensions": ["orders.status"]}' | airlayer query -q -
 ```
 
+### Pre-aggregation cache
+
+When executing queries (`-x`), airlayer automatically checks for pre-aggregated rollups before hitting the raw table. Use `--no-cache` to bypass:
+
+```bash
+airlayer query -x --config config.yml --no-cache \
+  --dimension orders.status \
+  --measure orders.total_revenue
+```
+
+See [pre-aggregation.md](pre-aggregation.md) for the full guide.
+
 ## Motifs
 
 Motifs add post-aggregation analytical columns by wrapping the base query as a CTE. Use `--motif <name>` on the CLI or `"motif": "<name>"` in the JSON query.
