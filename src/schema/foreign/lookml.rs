@@ -212,20 +212,22 @@ fn peek_until_brace_or_semicolons(chars: &[char], pos: &mut usize) -> String {
             break;
         }
         // Check for `{` — don't consume it (caller handles it).
-        // Skip `${` (LookML variable reference), `{%` and `{{` (Liquid templates).
+        // Skip `${` (LookML variable reference), `@{` (Looker constant),
+        // `{%` and `{{` (Liquid templates).
         if !in_string && chars[*pos] == '{' {
             let prev_dollar = *pos > 0 && chars[*pos - 1] == '$';
+            let prev_at = *pos > 0 && chars[*pos - 1] == '@';
             let next_pct = *pos + 1 < chars.len() && chars[*pos + 1] == '%';
             let next_brace = *pos + 1 < chars.len() && chars[*pos + 1] == '{';
-            if !prev_dollar && !next_pct && !next_brace {
+            if !prev_dollar && !prev_at && !next_pct && !next_brace {
                 break;
             }
         }
         // Check for `}` — don't consume it (parent block handles it).
-        // But skip `}` inside `${ }` references.
+        // But skip `}` inside `${ }` and `@{ }` references.
         if !in_string && chars[*pos] == '}' {
-            // Count unclosed `${` references
-            let opens = value.matches("${").count();
+            // Count unclosed `${` and `@{` references
+            let opens = value.matches("${").count() + value.matches("@{").count();
             let closes = value.matches('}').count();
             if opens <= closes {
                 break;
@@ -334,6 +336,68 @@ pub fn convert(content: &str, source: &str) -> Result<ConversionResult, String> 
     }
 
     Ok(ConversionResult { views, warnings })
+}
+
+/// Convert an entire LookML directory, aggregating views and explores across files.
+///
+/// In real-world LookML projects, views and explores are typically in separate files.
+/// This function collects all views first, then applies all explores so that joins
+/// from explore files can reference views from other files.
+#[cfg(feature = "cli")]
+pub fn convert_directory(dir: &std::path::Path) -> Result<ConversionResult, String> {
+    let mut all_views = Vec::new();
+    let mut all_explores: Vec<(String, Vec<(String, LkmlValue)>)> = Vec::new();
+    let mut all_warnings = Vec::new();
+
+    let pattern = dir.join("**/*.lkml");
+    let pattern_str = pattern.to_str().ok_or("Invalid path encoding")?;
+    for entry in glob::glob(pattern_str).map_err(|e| format!("Glob error: {}", e))? {
+        let path = entry.map_err(|e| format!("Path error: {}", e))?;
+        let content = match std::fs::read_to_string(&path) {
+            Ok(c) => c,
+            Err(e) => {
+                all_warnings.push(format!("Skipping {}: {}", path.display(), e));
+                continue;
+            }
+        };
+        let blocks = match parse_lkml(&content) {
+            Ok(b) => b,
+            Err(e) => {
+                all_warnings.push(format!("Skipping {}: {}", path.display(), e));
+                continue;
+            }
+        };
+        for (block_type, block_name, fields) in blocks {
+            match block_type.as_str() {
+                "view" => {
+                    let view = convert_view(&block_name, &fields, &mut all_warnings);
+                    all_views.push(view);
+                }
+                "explore" => {
+                    all_explores.push((block_name, fields));
+                }
+                _ => {} // model, access_grant, datagroup, etc.
+            }
+        }
+    }
+
+    // Apply all explores to the aggregated views
+    for (explore_name, explore_fields) in &all_explores {
+        apply_explore_joins(&mut all_views, explore_name, explore_fields, &mut all_warnings);
+    }
+
+    if all_views.is_empty() && !all_warnings.is_empty() {
+        return Err(format!(
+            "No views converted from LookML files in {}. Warnings:\n{}",
+            dir.display(),
+            all_warnings.join("\n")
+        ));
+    }
+
+    Ok(ConversionResult {
+        views: all_views,
+        warnings: all_warnings,
+    })
 }
 
 fn convert_view(name: &str, fields: &[(String, LkmlValue)], warnings: &mut Vec<String>) -> View {
@@ -449,9 +513,12 @@ fn convert_lookml_dimension(
     let mut name = String::new();
     let mut dim_type = String::new();
     let mut sql_expr = String::new();
+    let mut sql_start = String::new();
+    let mut _sql_end = String::new();
     let mut desc = None;
     let mut primary_key = None;
     let mut timeframes = Vec::new();
+    let mut intervals = Vec::new();
     let mut label = None;
 
     for (key, value) in fields {
@@ -469,6 +536,16 @@ fn convert_lookml_dimension(
             "sql" => {
                 if let LkmlValue::Scalar(v) = value {
                     sql_expr = v.clone();
+                }
+            }
+            "sql_start" => {
+                if let LkmlValue::Scalar(v) = value {
+                    sql_start = v.clone();
+                }
+            }
+            "sql_end" => {
+                if let LkmlValue::Scalar(v) = value {
+                    _sql_end = v.clone();
                 }
             }
             "description" => {
@@ -491,11 +568,16 @@ fn convert_lookml_dimension(
                     timeframes = items.clone();
                 }
             }
+            "intervals" => {
+                if let LkmlValue::List(items) = value {
+                    intervals = items.clone();
+                }
+            }
             _ => {}
         }
     }
 
-    if is_group && (dim_type == "time" || dim_type == "duration") {
+    if is_group && dim_type == "time" {
         let rewritten_sql = rewrite_dollar_refs(&sql_expr, view_name);
         let tf_strs: Vec<&str> = timeframes.iter().map(|s| s.as_str()).collect();
         return expand_dimension_group(
@@ -505,7 +587,34 @@ fn convert_lookml_dimension(
             Some(&sql_expr),
             desc.as_deref(),
             &tf_strs,
-            &tf_strs, // timeframes field also holds intervals for duration groups in LookML
+            &tf_strs,
+        );
+    }
+
+    if is_group && dim_type == "duration" {
+        // Duration groups use sql_start/sql_end instead of sql, and intervals instead of timeframes.
+        // Use sql_start as the expression placeholder (the actual duration calculation is done by the BI tool).
+        let duration_sql = if !sql_start.is_empty() {
+            rewrite_dollar_refs(&sql_start, view_name)
+        } else {
+            rewrite_dollar_refs(&sql_expr, view_name)
+        };
+        let original = if !sql_start.is_empty() {
+            Some(sql_start.as_str())
+        } else if !sql_expr.is_empty() {
+            Some(sql_expr.as_str())
+        } else {
+            None
+        };
+        let ivs: Vec<&str> = intervals.iter().map(|s| s.as_str()).collect();
+        return expand_dimension_group(
+            &name,
+            &dim_type,
+            &duration_sql,
+            original,
+            desc.as_deref(),
+            &[],    // timeframes not used for duration
+            &ivs,
         );
     }
 
@@ -699,16 +808,45 @@ fn convert_lookml_filter_to_segment(
 }
 
 /// Apply explore-level joins to the corresponding view entities.
+///
+/// Handles `from:` (the actual view name) and `view_name:` (alias used in sql_on).
+/// When an explore has `from: actual_view view_name: alias`, the joins are
+/// applied to `actual_view`, and the alias is used to extract join keys from sql_on.
 fn apply_explore_joins(
     views: &mut [View],
     explore_name: &str,
     fields: &[(String, LkmlValue)],
     _warnings: &mut Vec<String>,
 ) {
+    // Check if the explore has a `from:` field (actual view name) or `view_name:` (alias)
+    let mut from_view = None;
+    let mut view_alias = None;
+    for (key, value) in fields {
+        match key.as_str() {
+            "from" => {
+                if let LkmlValue::Scalar(v) = value {
+                    from_view = Some(v.clone());
+                }
+            }
+            "view_name" => {
+                if let LkmlValue::Scalar(v) = value {
+                    view_alias = Some(v.clone());
+                }
+            }
+            _ => {}
+        }
+    }
+
+    // The actual view to attach entities to
+    let base_view_name = from_view.as_deref().unwrap_or(explore_name);
+    // The name used in sql_on references (view_name alias or explore name)
+    let sql_ref_name = view_alias.as_deref().unwrap_or(explore_name);
+
     for (key, value) in fields {
         if key == "join" {
             if let LkmlValue::Block(join_fields) = value {
                 let mut join_name = String::new();
+                let mut join_from = None;
                 let mut relationship = String::new();
                 let mut sql_on = String::new();
 
@@ -717,6 +855,11 @@ fn apply_explore_joins(
                         "name" => {
                             if let LkmlValue::Scalar(v) = jv {
                                 join_name = v.clone();
+                            }
+                        }
+                        "from" => {
+                            if let LkmlValue::Scalar(v) = jv {
+                                join_from = Some(v.clone());
                             }
                         }
                         "relationship" => {
@@ -739,13 +882,35 @@ fn apply_explore_joins(
 
                 let entity_type = relationship_to_entity_type(&relationship);
 
-                // Extract the join key from sql_on
-                let fk = extract_dollar_join_key(&sql_on, explore_name);
+                // Extract the join key from sql_on using the base view's reference name
+                let fk = extract_dollar_join_key(&sql_on, sql_ref_name)
+                    .or_else(|| extract_dollar_join_key(&sql_on, base_view_name));
+
+                // The entity name should reference the actual view, not the alias
+                let entity_name = join_from.unwrap_or(join_name);
 
                 // Add foreign entity to the base explore view
-                if let Some(base_view) = views.iter_mut().find(|v| v.name == *explore_name) {
+                if let Some(base_view) = views.iter_mut().find(|v| v.name == base_view_name) {
+                    // Auto-create implicit dimension for join key if not declared
+                    if let Some(ref fk_name) = fk {
+                        if !base_view.dimensions.iter().any(|d| d.name == *fk_name) {
+                            base_view.dimensions.push(Dimension {
+                                name: fk_name.clone(),
+                                dimension_type: DimensionType::String,
+                                description: None,
+                                expr: fk_name.clone(),
+                                original_expr: None,
+                                samples: None,
+                                synonyms: None,
+                                primary_key: None,
+                                sub_query: None,
+                                inherits_from: None,
+                                meta: None,
+                            });
+                        }
+                    }
                     base_view.entities.push(Entity {
-                        name: join_name,
+                        name: entity_name,
                         entity_type,
                         description: None,
                         key: fk,

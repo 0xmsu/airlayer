@@ -99,9 +99,12 @@ pub fn convert_directory(
     format: ForeignFormat,
     dir: &std::path::Path,
 ) -> Result<ConversionResult, String> {
-    // Omni has its own directory-aware parser
+    // Omni and LookML have their own directory-aware parsers
     if format == ForeignFormat::Omni {
         return omni::convert_directory(dir);
+    }
+    if format == ForeignFormat::LookML {
+        return lookml::convert_directory(dir);
     }
 
     let mut all_views = Vec::new();
@@ -237,7 +240,7 @@ pub(crate) fn parse_foreign_dimension_type(s: &str) -> DimensionType {
             DimensionType::String
         }
         "number" | "tier" => DimensionType::Number,
-        "time" | "datetime" | "date_time" => DimensionType::Datetime,
+        "time" | "datetime" | "date_time" | "date_raw" => DimensionType::Datetime,
         "date" => DimensionType::Date,
         "boolean" | "yesno" | "yes_no" => DimensionType::Boolean,
         "geo" => DimensionType::Geo,
