@@ -1817,6 +1817,8 @@ fn print_banner() {
 /// Initialize an airlayer project directory with config.yml, CLAUDE.md, and Claude Code skills.
 /// When stdin is a TTY, runs a discovery-driven interactive flow:
 ///   credentials → connect → discover databases → select → discover tables → select → generate views.
+/// If foreign semantic models are detected (Cube.js, LookML, dbt, Omni), skips view bootstrapping
+/// and extracts connection info from repo-specific files.
 /// Otherwise, generates a template config.
 fn run_init(
     path: Option<&PathBuf>,
@@ -1838,7 +1840,14 @@ fn run_init(
     let views_dir = target.to_path_buf();
     let is_interactive = std::io::stdin().is_terminal() && !config_path.exists();
 
-    if is_interactive {
+    // Detect foreign semantic models before starting the flow
+    let foreign_format = crate::schema::foreign::detect_format(target);
+
+    if is_interactive && foreign_format.is_some() {
+        // --- Foreign model repo flow ---
+        let format = foreign_format.unwrap();
+        run_init_foreign(format, target, db_type_flag, &config_path, &mut created)?;
+    } else if is_interactive {
         // --- Interactive discovery flow ---
         print_banner();
         println!();
@@ -1879,6 +1888,13 @@ fn run_init(
         if !config_path.exists() {
             let config_content = if let Some(t) = db_type_flag {
                 prompts::config_template_for_type(t).unwrap_or_else(|| INIT_CONFIG_YML.to_string())
+            } else if let Some(fmt) = foreign_format {
+                // Non-interactive foreign repo — generate a placeholder config with a comment
+                format!(
+                    "# {} project detected — fill in your database connection.\n{}",
+                    fmt.display_name(),
+                    INIT_CONFIG_YML
+                )
             } else {
                 INIT_CONFIG_YML.to_string()
             };
@@ -1990,6 +2006,153 @@ fn run_init(
     println!();
 
     Ok(())
+}
+
+/// Foreign model repo init: detect format, extract connection info, prompt for credentials, write config.
+/// Skips table discovery and view bootstrapping — views come from the foreign models.
+fn run_init_foreign(
+    format: ForeignFormat,
+    target: &Path,
+    db_type_flag: Option<&str>,
+    config_path: &Path,
+    created: &mut Vec<String>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use console::style;
+
+    print_banner();
+    println!();
+
+    // Count views in the foreign repo for the status message
+    let view_count = count_foreign_views(format, target);
+    let count_msg = if view_count > 0 {
+        format!(" with {} model files", view_count)
+    } else {
+        String::new()
+    };
+    println!(
+        "  {} Detected {} project{}",
+        style("~").green(),
+        style(format.display_name()).cyan().bold(),
+        count_msg
+    );
+    println!(
+        "  {}",
+        style("  Views will be loaded directly from the existing model files.").dim()
+    );
+    println!();
+
+    // Extract connection info from repo-specific files (best-effort)
+    let extracted = match format {
+        ForeignFormat::Dbt => prompts::extract_dbt_connection(target),
+        ForeignFormat::Cube => prompts::extract_cube_connection(target),
+        _ => std::collections::BTreeMap::new(), // LookML/Omni don't store connection info in repo
+    };
+
+    // Show what we found
+    let extracted_db_type = extracted.get("db_type").cloned();
+    if !extracted.is_empty() {
+        let source = match format {
+            ForeignFormat::Dbt => "~/.dbt/profiles.yml",
+            ForeignFormat::Cube => ".env",
+            _ => "repo files",
+        };
+        let field_count = extracted.len() - if extracted.contains_key("db_type") { 1 } else { 0 };
+        if field_count > 0 {
+            println!(
+                "  {} Found {} connection fields from {}",
+                style("~").green(),
+                style(field_count).bold(),
+                style(source).dim()
+            );
+        }
+    }
+
+    // Determine database type: flag > extracted > prompt
+    let db_type = if let Some(t) = db_type_flag {
+        if !prompts::DB_TYPES.contains(&t) {
+            return Err(format!(
+                "Unknown database type '{}'. Supported: {}",
+                t,
+                prompts::DB_TYPES.join(", ")
+            )
+            .into());
+        }
+        println!("  {} {}", style("Database:").bold(), style(t).cyan());
+        t.to_string()
+    } else if let Some(ref detected) = extracted_db_type {
+        if prompts::DB_TYPES.contains(&detected.as_str()) {
+            println!(
+                "  {} {} (detected)",
+                style("Database:").bold(),
+                style(detected).cyan()
+            );
+            detected.clone()
+        } else {
+            prompts::select_database_type()?
+        }
+    } else {
+        prompts::select_database_type()?
+    };
+
+    // Prompt for credentials with extracted values as defaults
+    let fields = prompts::prompt_foreign_credentials(&db_type, &extracted)?;
+
+    // Write config.yml
+    let config_content = prompts::generate_config_yml(&db_type, &fields);
+    std::fs::write(config_path, &config_content)?;
+    created.push("config.yml".to_string());
+
+    Ok(())
+}
+
+/// Count the number of views in a foreign model directory (best-effort, for display only).
+fn count_foreign_views(format: ForeignFormat, dir: &Path) -> usize {
+    match format {
+        ForeignFormat::LookML => {
+            glob::glob(dir.join("**/*.lkml").to_str().unwrap_or(""))
+                .ok()
+                .map(|paths| paths.filter_map(|p| p.ok()).count())
+                .unwrap_or(0)
+        }
+        ForeignFormat::Omni => {
+            glob::glob(dir.join("**/*.view.yaml").to_str().unwrap_or(""))
+                .ok()
+                .map(|paths| paths.filter_map(|p| p.ok()).count())
+                .unwrap_or(0)
+        }
+        ForeignFormat::Cube => {
+            // Count YAML files that contain 'cubes:' key
+            let mut count = 0;
+            for ext in &["yml", "yaml"] {
+                if let Ok(paths) = glob::glob(dir.join(format!("**/*.{}", ext)).to_str().unwrap_or("")) {
+                    for path in paths.flatten() {
+                        if let Ok(content) = std::fs::read_to_string(&path) {
+                            if content.lines().any(|l| l.starts_with("cubes:")) {
+                                count += 1;
+                            }
+                        }
+                    }
+                }
+            }
+            count
+        }
+        ForeignFormat::Dbt => {
+            // Count YAML files that contain 'semantic_models:' key
+            let mut count = 0;
+            for ext in &["yml", "yaml"] {
+                if let Ok(paths) = glob::glob(dir.join(format!("**/*.{}", ext)).to_str().unwrap_or("")) {
+                    for path in paths.flatten() {
+                        if let Ok(content) = std::fs::read_to_string(&path) {
+                            if content.lines().any(|l| l.starts_with("semantic_models:")) {
+                                count += 1;
+                            }
+                        }
+                    }
+                }
+            }
+            count
+        }
+    }
 }
 
 /// Discovery-driven init: connect → list databases → select → discover tables → select → generate views.
@@ -2827,6 +2990,10 @@ config.yml              Database connection configuration
 *.motif.yml             Custom analytical patterns (optional, can also go in motifs/)
 *.query.yml             Saved queries (optional, can also go in queries/)
 ```
+
+## Foreign model support
+
+airlayer natively loads Cube.js, LookML, dbt MetricFlow, and Omni semantic models. When no `.view.yml` files are found, it auto-detects foreign formats and loads them directly — no conversion step required. Run `airlayer init` inside an existing foreign model repo to set up `config.yml` with your database connection.
 
 ## Sub-agents
 

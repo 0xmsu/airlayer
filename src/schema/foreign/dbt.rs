@@ -16,6 +16,7 @@ use super::{
     RE_DBT_REF, RE_DBT_SOURCE,
 };
 use crate::schema::models::*;
+use regex::Regex;
 use serde::Deserialize;
 
 // ── dbt MetricFlow native types ──────────────────────────────────────
@@ -413,19 +414,23 @@ fn convert_dbt_measure(m: &DbtMeasure, _model_name: &str, _warnings: &mut Vec<St
     let filters = if m.filters.is_empty() {
         None
     } else {
-        Some(
-            m.filters
-                .iter()
-                .filter_map(|f| {
-                    let filter_expr = f.filter_expr.as_ref().or(f.sql.as_ref())?;
-                    Some(MeasureFilter {
-                        expr: rewrite_dbt_jinja(filter_expr),
-                        original_expr: Some(filter_expr.clone()),
-                        description: None,
-                    })
+        let collected: Vec<_> = m
+            .filters
+            .iter()
+            .filter_map(|f| {
+                let filter_expr = f.filter_expr.as_ref().or(f.sql.as_ref())?;
+                Some(MeasureFilter {
+                    expr: rewrite_dbt_jinja(filter_expr),
+                    original_expr: Some(filter_expr.clone()),
+                    description: None,
                 })
-                .collect::<Vec<_>>(),
-        )
+            })
+            .collect();
+        if collected.is_empty() {
+            None
+        } else {
+            Some(collected)
+        }
     };
 
     Measure {
@@ -580,20 +585,17 @@ fn apply_metric(views: &mut [View], metric: &DbtMetric, warnings: &mut Vec<Strin
 }
 
 /// Rewrite derived metric expressions — replace metric aliases with references.
-/// Sorts by alias length (longest first) to prevent substring corruption.
+/// Uses word-boundary matching to avoid corrupting unrelated identifiers.
 fn rewrite_dbt_metric_expr(expr: &str, inputs: &[DbtDerivedMetricInput]) -> String {
     let mut result = expr.to_string();
-    // Sort by alias length descending to prevent "revenue" matching inside "total_revenue"
-    let mut sorted: Vec<_> = inputs
-        .iter()
-        .map(|input| {
-            let alias = input.alias.as_deref().unwrap_or(&input.name);
-            (alias, &input.name)
-        })
-        .collect();
-    sorted.sort_by(|a, b| b.0.len().cmp(&a.0.len()));
-    for (alias, name) in sorted {
-        result = result.replace(alias, &format!("{{{{{}}}}}", name));
+    for input in inputs {
+        let alias = input.alias.as_deref().unwrap_or(&input.name);
+        let pattern = format!(r"\b{}\b", regex::escape(alias));
+        if let Ok(re) = Regex::new(&pattern) {
+            result = re
+                .replace_all(&result, format!("{{{{{}}}}}", input.name))
+                .to_string();
+        }
     }
     result
 }
@@ -833,6 +835,34 @@ semantic_models:
             label: None,
         };
         assert_eq!(resolve_table(&model), Some("stg_orders".to_string()));
+    }
+
+    #[test]
+    fn test_rewrite_dbt_metric_expr_word_boundary() {
+        let inputs = vec![
+            DbtDerivedMetricInput {
+                name: "revenue".to_string(),
+                alias: None,
+                offset_window: None,
+                filters: vec![],
+            },
+            DbtDerivedMetricInput {
+                name: "cost".to_string(),
+                alias: None,
+                offset_window: None,
+                filters: vec![],
+            },
+        ];
+        // Should NOT corrupt "gross_revenue" when replacing "revenue"
+        assert_eq!(
+            rewrite_dbt_metric_expr("gross_revenue - cost", &inputs),
+            "gross_revenue - {{cost}}"
+        );
+        // Should replace standalone "revenue"
+        assert_eq!(
+            rewrite_dbt_metric_expr("revenue - cost", &inputs),
+            "{{revenue}} - {{cost}}"
+        );
     }
 
     #[test]

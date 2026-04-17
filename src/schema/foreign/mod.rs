@@ -99,6 +99,11 @@ pub fn convert_directory(
     format: ForeignFormat,
     dir: &std::path::Path,
 ) -> Result<ConversionResult, String> {
+    // Omni has its own directory-aware parser
+    if format == ForeignFormat::Omni {
+        return omni::convert_directory(dir);
+    }
+
     let mut all_views = Vec::new();
     let mut all_warnings = Vec::new();
 
@@ -141,9 +146,10 @@ pub fn convert_directory(
 ///
 /// Detection heuristics (checked in order):
 /// 1. `.lkml` files → LookML
-/// 2. YAML files containing `cubes:` key → Cube.js
-/// 3. YAML files containing `semantic_models:` key → dbt MetricFlow
-/// 4. YAML files containing top-level `views:` + `topics:` keys → Omni
+/// 2. Omni directory format: `model.yaml` or `relationships.yaml` + `*.view.yaml` files
+/// 3. YAML files containing `cubes:` key → Cube.js
+/// 4. YAML files containing `semantic_models:` key → dbt MetricFlow
+/// 5. YAML files containing top-level `views:` + `topics:` keys → Omni (legacy single-file)
 ///
 /// Returns `None` if no foreign format is detected.
 #[cfg(feature = "cli")]
@@ -154,6 +160,11 @@ pub fn detect_format(dir: &std::path::Path) -> Option<ForeignFormat> {
         if paths.into_iter().any(|p| p.is_ok()) {
             return Some(ForeignFormat::LookML);
         }
+    }
+
+    // Check for Omni directory format (model.yaml/relationships.yaml + *.view.yaml)
+    if omni::is_omni_directory(dir) {
+        return Some(ForeignFormat::Omni);
     }
 
     // Scan YAML files for format-specific keys
@@ -183,7 +194,7 @@ pub fn detect_format(dir: &std::path::Path) -> Option<ForeignFormat> {
                 if line.starts_with("semantic_models:") {
                     has_semantic_models = true;
                 }
-                // Omni uses map-style `views:` + `topics:` at top level
+                // Omni legacy uses map-style `views:` + `topics:` at top level
                 if line.starts_with("views:") {
                     has_omni_views = true;
                 }
@@ -194,7 +205,7 @@ pub fn detect_format(dir: &std::path::Path) -> Option<ForeignFormat> {
         }
     }
 
-    // Priority: Cube > dbt > Omni (Omni requires both views: + topics:)
+    // Priority: Cube > dbt > Omni legacy (requires both views: + topics:)
     if has_cubes {
         return Some(ForeignFormat::Cube);
     }
@@ -249,7 +260,7 @@ pub(crate) fn parse_foreign_measure_type(s: &str) -> MeasureType {
         "run_total" | "runtotal" | "running_total" | "sum_boolean" | "sum_distinct" => {
             MeasureType::Sum
         }
-        "average_distinct" => MeasureType::Average,
+        "average_distinct" | "average_distinct_on" => MeasureType::Average,
         "list" | "string" => MeasureType::Custom,
         _ => MeasureType::Custom,
     }

@@ -11,8 +11,8 @@
 //! - Primary key detection
 
 use super::{
-    extract_dollar_join_key, parse_foreign_dimension_type, parse_foreign_measure_type,
-    relationship_to_entity_type, rewrite_dollar_refs, ConversionResult,
+    expand_dimension_group, extract_dollar_join_key, parse_foreign_dimension_type,
+    parse_foreign_measure_type, relationship_to_entity_type, rewrite_dollar_refs, ConversionResult,
 };
 use crate::schema::models::*;
 
@@ -494,70 +494,18 @@ fn convert_lookml_dimension(
         }
     }
 
-    if is_group && dim_type == "time" {
-        // Dimension group generates multiple dimensions — one per timeframe
-        if timeframes.is_empty() {
-            timeframes = vec![
-                "raw".into(),
-                "time".into(),
-                "date".into(),
-                "week".into(),
-                "month".into(),
-                "quarter".into(),
-                "year".into(),
-            ];
-        }
+    if is_group && (dim_type == "time" || dim_type == "duration") {
         let rewritten_sql = rewrite_dollar_refs(&sql_expr, view_name);
-        return timeframes
-            .iter()
-            .map(|tf| {
-                let dim_name = format!("{}_{}", name, tf);
-                let dimension_type = match tf.as_str() {
-                    "raw" | "time" => DimensionType::Datetime,
-                    "date" | "week" | "month" | "quarter" | "year" => DimensionType::Date,
-                    _ => DimensionType::String,
-                };
-                Dimension {
-                    name: dim_name,
-                    dimension_type,
-                    description: desc.clone(),
-                    expr: rewritten_sql.clone(),
-                    original_expr: Some(sql_expr.clone()),
-                    samples: None,
-                    synonyms: None,
-                    primary_key: None,
-                    sub_query: None,
-                    inherits_from: None,
-                    meta: None,
-                }
-            })
-            .collect();
-    }
-
-    if is_group && dim_type == "duration" {
-        // Duration dimension groups — generate intervals
-        let rewritten = rewrite_dollar_refs(&sql_expr, view_name);
-        let intervals = if timeframes.is_empty() {
-            vec!["day".to_string(), "hour".to_string(), "minute".to_string()]
-        } else {
-            timeframes
-        };
-        return intervals
-            .iter()
-            .map(|interval| Dimension {
-                name: format!("{}_{}", name, interval),
-                dimension_type: DimensionType::Number,
-                description: desc.clone(),
-                expr: rewritten.clone(),
-                original_expr: Some(sql_expr.clone()),
-                samples: None,
-                synonyms: None,
-                primary_key: None,
-                sub_query: None,
-                inherits_from: None,
-                meta: None,
-            })
-            .collect();
+        let tf_strs: Vec<&str> = timeframes.iter().map(|s| s.as_str()).collect();
+        return expand_dimension_group(
+            &name,
+            &dim_type,
+            &rewritten_sql,
+            Some(&sql_expr),
+            desc.as_deref(),
+            &tf_strs,
+            &tf_strs, // timeframes field also holds intervals for duration groups in LookML
+        );
     }
 
     let dimension_type = parse_foreign_dimension_type(&dim_type);
