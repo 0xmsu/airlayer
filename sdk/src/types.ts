@@ -89,6 +89,7 @@ export interface CatalogEntry {
   description?: string;
   view?: string;
   member_type?: string;
+  meta?: Record<string, string[]>;
 }
 
 // ---------------------------------------------------------------------------

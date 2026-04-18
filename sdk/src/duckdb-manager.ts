@@ -34,9 +34,11 @@ export class DuckDBManager implements DuckDBEngine {
   }
 
   async loadParquet(tableName: string, data: Uint8Array): Promise<void> {
+    const safeName = tableName.replace(/"/g, '""');
+    const safeFile = tableName.replace(/'/g, "''");
     await this.db.registerFileBuffer(`${tableName}.parquet`, data);
     await this.conn.query(
-      `CREATE OR REPLACE TABLE "${tableName}" AS SELECT * FROM read_parquet('${tableName}.parquet')`,
+      `CREATE OR REPLACE TABLE "${safeName}" AS SELECT * FROM read_parquet('${safeFile}.parquet')`,
     );
   }
 
@@ -50,12 +52,14 @@ export class DuckDBManager implements DuckDBEngine {
       type: arrowTypeToString(f.type),
     }));
 
+    // Pre-fetch column vectors (Arrow is column-oriented)
+    const vectors = columns.map((_: ColumnMeta, idx: number) => result.getChildAt(idx));
+
     const rows: Record<string, unknown>[] = [];
     for (let i = 0; i < result.numRows; i++) {
       const row: Record<string, unknown> = {};
-      for (const col of columns) {
-        const vec = result.getChildAt(columns.indexOf(col));
-        row[col.key] = vec?.get(i);
+      for (let colIdx = 0; colIdx < columns.length; colIdx++) {
+        row[columns[colIdx].key] = vectors[colIdx]?.get(i);
       }
       rows.push(row);
     }
