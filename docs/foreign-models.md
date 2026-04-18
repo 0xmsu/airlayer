@@ -1,6 +1,6 @@
 # Foreign Semantic Model Support
 
-airlayer works out of the box with Cube.js, Looker LookML, dbt MetricFlow, and Omni repositories. Just point airlayer at a directory containing foreign model files and query directly — no conversion step required.
+airlayer works out of the box with Cube.js, Looker LookML, dbt MetricFlow, and Omni repositories — no conversion step required. Run `airlayer init` inside an existing repo to set up your database connection, then query directly.
 
 ## Supported Formats
 
@@ -13,23 +13,29 @@ airlayer works out of the box with Cube.js, Looker LookML, dbt MetricFlow, and O
 
 ## Quick Start
 
-### Query directly from any format (no conversion needed)
+### Setup
+
+Run `airlayer init` inside an existing foreign model repo. It auto-detects the format, extracts connection details from repo-specific files (dbt `profiles.yml`, Cube `.env`), and generates a `config.yml` with your database connection:
 
 ```bash
-# In a Cube.js project directory
-cd /path/to/cube-project
-airlayer query --measure orders.count --dimension orders.status
-
-# In a LookML project
 cd /path/to/lookml-project
-airlayer query --measure orders.total_revenue --dimension orders.status
+airlayer init
+# → Detected LookML project with 24 view files
+# → Generated config.yml
+```
 
-# In a dbt project with semantic models
-cd /path/to/dbt-project
-airlayer query --measure orders.order_count --dimension orders.status
+### Query directly (no conversion needed)
 
-# In an Omni project
-cd /path/to/omni-project
+Once initialized, query directly — airlayer auto-detects foreign model files and loads them natively:
+
+```bash
+# SQL compilation (no database connection needed, just --dialect)
+airlayer query --measure orders.count --dimension orders.status -d postgres
+
+# SQL execution (requires config.yml from airlayer init)
+airlayer query --measure orders.count --dimension orders.status -x
+
+# Inspect available views
 airlayer inspect
 ```
 

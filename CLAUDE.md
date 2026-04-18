@@ -276,12 +276,17 @@ steps:
 
 ## Foreign semantic model support
 
-airlayer works out of the box with Cube.js, LookML, dbt MetricFlow, and Omni repositories. When no `.view.yml` files are found in a project directory, airlayer auto-detects foreign formats and loads them natively — no conversion step required.
+airlayer works out of the box with Cube.js, LookML, dbt MetricFlow, and Omni repositories. When no `.view.yml` files are found in a project directory, airlayer auto-detects foreign formats and loads them natively — no conversion step required. Run `airlayer init` inside the repo to set up `config.yml` with your database connection before executing queries.
 
 ```bash
-# Query directly from a Cube.js/LookML/dbt/Omni project
-cd /path/to/cube-project && airlayer query --measure orders.count
-cd /path/to/lookml-project && airlayer inspect
+# Initialize inside a foreign model repo (sets up config.yml)
+cd /path/to/lookml-project && airlayer init
+
+# SQL compilation works without config.yml (just needs --dialect)
+airlayer query --measure orders.count -d postgres
+
+# SQL execution requires config.yml (from airlayer init)
+airlayer query --measure orders.count -x
 
 # Explicit conversion (optional)
 airlayer convert --format cube ./cube_schema/ --output ./views/

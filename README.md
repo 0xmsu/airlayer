@@ -85,7 +85,7 @@ All dialects support SQL compilation. Execution requires the corresponding featu
 
 ## Foreign semantic model support
 
-airlayer can query directly from Cube.js, Looker LookML, dbt MetricFlow, and Omni repositories — no conversion step required. Just point airlayer at a project directory and it auto-detects the format.
+airlayer can query directly from Cube.js, Looker LookML, dbt MetricFlow, and Omni repositories — no conversion step required. Run `airlayer init` inside an existing repo to set up your database connection, then query as usual.
 
 | Feature | Cube.js | LookML | dbt | Omni |
 |---------|:-------:|:------:|:---:|:----:|
