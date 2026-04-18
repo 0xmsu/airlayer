@@ -17,6 +17,7 @@ pub mod python;
 pub use dialect::Dialect;
 pub use engine::preagg;
 pub use engine::{DatabaseConfig, DatasourceDialectMap, PartialConfig, SemanticEngine};
+pub use schema::foreign::{self, ForeignFormat};
 pub use schema::models::{
     Dimension, Entity, Measure, Motif, MotifKind, MotifOutputColumn, MotifParam, SavedQuery,
     SavedQueryParam, SavedQueryStep, SemanticLayer, Topic, View,
