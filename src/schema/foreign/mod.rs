@@ -3,10 +3,18 @@
 //! Converts external semantic layer formats (Cube.js, LookML, dbt MetricFlow, Omni)
 //! into airlayer's native `View` representation, enabling SQL compilation from any
 //! supported modeling language.
+//!
+//! Each format is gated behind a feature flag (`foreign-cube`, `foreign-lookml`,
+//! `foreign-dbt`, `foreign-omni`). The `foreign` meta-feature enables all formats.
+//! The `cli` feature includes `foreign` by default.
 
+#[cfg(feature = "foreign-cube")]
 pub mod cube;
+#[cfg(feature = "foreign-dbt")]
 pub mod dbt;
+#[cfg(feature = "foreign-lookml")]
 pub mod lookml;
+#[cfg(feature = "foreign-omni")]
 pub mod omni;
 
 use crate::schema::models::*;
@@ -30,9 +38,13 @@ impl ForeignFormat {
     /// Parse a format name string (case-insensitive).
     pub fn parse_name(s: &str) -> Option<Self> {
         match s.to_lowercase().as_str() {
+            #[cfg(feature = "foreign-cube")]
             "cube" | "cubejs" | "cube.js" | "cube_js" => Some(Self::Cube),
+            #[cfg(feature = "foreign-lookml")]
             "lookml" | "looker" | "lkml" => Some(Self::LookML),
+            #[cfg(feature = "foreign-dbt")]
             "dbt" | "metricflow" | "dbt_metricflow" => Some(Self::Dbt),
+            #[cfg(feature = "foreign-omni")]
             "omni" | "omni_analytics" => Some(Self::Omni),
             _ => None,
         }
@@ -56,6 +68,22 @@ impl ForeignFormat {
             Self::Dbt => "dbt MetricFlow",
             Self::Omni => "Omni",
         }
+    }
+
+    /// List all formats that are compiled in.
+    #[allow(clippy::vec_init_then_push)]
+    pub fn available() -> Vec<Self> {
+        #[allow(unused_mut)]
+        let mut formats = Vec::new();
+        #[cfg(feature = "foreign-cube")]
+        formats.push(Self::Cube);
+        #[cfg(feature = "foreign-lookml")]
+        formats.push(Self::LookML);
+        #[cfg(feature = "foreign-dbt")]
+        formats.push(Self::Dbt);
+        #[cfg(feature = "foreign-omni")]
+        formats.push(Self::Omni);
+        formats
     }
 }
 
@@ -82,14 +110,23 @@ pub struct ConversionResult {
 /// * `source` - Source file path (for error messages)
 pub fn convert(
     format: ForeignFormat,
-    content: &str,
-    source: &str,
+    _content: &str,
+    _source: &str,
 ) -> Result<ConversionResult, String> {
     match format {
-        ForeignFormat::Cube => cube::convert(content, source),
-        ForeignFormat::LookML => lookml::convert(content, source),
-        ForeignFormat::Dbt => dbt::convert(content, source),
-        ForeignFormat::Omni => omni::convert(content, source),
+        #[cfg(feature = "foreign-cube")]
+        ForeignFormat::Cube => cube::convert(_content, _source),
+        #[cfg(feature = "foreign-lookml")]
+        ForeignFormat::LookML => lookml::convert(_content, _source),
+        #[cfg(feature = "foreign-dbt")]
+        ForeignFormat::Dbt => dbt::convert(_content, _source),
+        #[cfg(feature = "foreign-omni")]
+        ForeignFormat::Omni => omni::convert(_content, _source),
+        #[allow(unreachable_patterns)]
+        other => Err(format!(
+            "{} support not compiled in (enable the corresponding foreign-* feature)",
+            other
+        )),
     }
 }
 
@@ -100,9 +137,11 @@ pub fn convert_directory(
     dir: &std::path::Path,
 ) -> Result<ConversionResult, String> {
     // Omni and LookML have their own directory-aware parsers
+    #[cfg(feature = "foreign-omni")]
     if format == ForeignFormat::Omni {
         return omni::convert_directory(dir);
     }
+    #[cfg(feature = "foreign-lookml")]
     if format == ForeignFormat::LookML {
         return lookml::convert_directory(dir);
     }
@@ -158,65 +197,77 @@ pub fn convert_directory(
 #[cfg(feature = "cli")]
 pub fn detect_format(dir: &std::path::Path) -> Option<ForeignFormat> {
     // Check for .lkml files first (unambiguous extension)
-    let lkml_pattern = dir.join("**/*.lkml");
-    if let Ok(paths) = glob::glob(lkml_pattern.to_str().unwrap_or("")) {
-        if paths.into_iter().any(|p| p.is_ok()) {
-            return Some(ForeignFormat::LookML);
+    #[cfg(feature = "foreign-lookml")]
+    {
+        let lkml_pattern = dir.join("**/*.lkml");
+        if let Ok(paths) = glob::glob(lkml_pattern.to_str().unwrap_or("")) {
+            if paths.into_iter().any(|p| p.is_ok()) {
+                return Some(ForeignFormat::LookML);
+            }
         }
     }
 
     // Check for Omni directory format (model.yaml/relationships.yaml + *.view.yaml)
+    #[cfg(feature = "foreign-omni")]
     if omni::is_omni_directory(dir) {
         return Some(ForeignFormat::Omni);
     }
 
-    // Scan YAML files for format-specific keys
-    let yaml_pattern = dir.join("**/*.yml");
-    let yaml2_pattern = dir.join("**/*.yaml");
-    let mut yaml_files = Vec::new();
-    for pattern in [&yaml_pattern, &yaml2_pattern] {
-        if let Ok(paths) = glob::glob(pattern.to_str().unwrap_or("")) {
-            for entry in paths.flatten() {
-                yaml_files.push(entry);
-            }
-        }
-    }
-
-    let mut has_cubes = false;
-    let mut has_semantic_models = false;
-    let mut has_omni_views = false;
-    let mut has_omni_topics = false;
-
-    for path in &yaml_files {
-        if let Ok(content) = std::fs::read_to_string(path) {
-            // Quick line-scan for top-level keys (column 0, avoids full YAML parse)
-            for line in content.lines() {
-                if line.starts_with("cubes:") {
-                    has_cubes = true;
-                }
-                if line.starts_with("semantic_models:") {
-                    has_semantic_models = true;
-                }
-                // Omni legacy uses map-style `views:` + `topics:` at top level
-                if line.starts_with("views:") {
-                    has_omni_views = true;
-                }
-                if line.starts_with("topics:") {
-                    has_omni_topics = true;
+    // Scan YAML files for format-specific keys (Cube, dbt, Omni legacy)
+    #[cfg(any(
+        feature = "foreign-cube",
+        feature = "foreign-dbt",
+        feature = "foreign-omni"
+    ))]
+    {
+        let yaml_pattern = dir.join("**/*.yml");
+        let yaml2_pattern = dir.join("**/*.yaml");
+        let mut yaml_files = Vec::new();
+        for pattern in [&yaml_pattern, &yaml2_pattern] {
+            if let Ok(paths) = glob::glob(pattern.to_str().unwrap_or("")) {
+                for entry in paths.flatten() {
+                    yaml_files.push(entry);
                 }
             }
         }
-    }
 
-    // Priority: Cube > dbt > Omni legacy (requires both views: + topics:)
-    if has_cubes {
-        return Some(ForeignFormat::Cube);
-    }
-    if has_semantic_models {
-        return Some(ForeignFormat::Dbt);
-    }
-    if has_omni_views && has_omni_topics {
-        return Some(ForeignFormat::Omni);
+        let mut has_cubes = false;
+        let mut has_semantic_models = false;
+        let mut has_omni_views = false;
+        let mut has_omni_topics = false;
+
+        for path in &yaml_files {
+            if let Ok(content) = std::fs::read_to_string(path) {
+                for line in content.lines() {
+                    if line.starts_with("cubes:") {
+                        has_cubes = true;
+                    }
+                    if line.starts_with("semantic_models:") {
+                        has_semantic_models = true;
+                    }
+                    if line.starts_with("views:") {
+                        has_omni_views = true;
+                    }
+                    if line.starts_with("topics:") {
+                        has_omni_topics = true;
+                    }
+                }
+            }
+        }
+
+        // Priority: Cube > dbt > Omni legacy (requires both views: + topics:)
+        #[cfg(feature = "foreign-cube")]
+        if has_cubes {
+            return Some(ForeignFormat::Cube);
+        }
+        #[cfg(feature = "foreign-dbt")]
+        if has_semantic_models {
+            return Some(ForeignFormat::Dbt);
+        }
+        #[cfg(feature = "foreign-omni")]
+        if has_omni_views && has_omni_topics {
+            return Some(ForeignFormat::Omni);
+        }
     }
 
     None
