@@ -52,10 +52,12 @@ const result = await client.query({
   filters: [{ member: 'orders.region', operator: 'equals', values: ['US'] }],
 });
 
+// result.ok      → true if data was returned, false if query couldn't execute
 // result.rows    → [{ orders__status: 'active', orders__total_revenue: 1234 }, ...]
 // result.columns → [{ key: 'orders__status', type: 'string' }, ...]
-// result.sql     → 'SELECT ...'
-// result.source  → 'pre_aggregate' | 'proxy'
+// result.sql     → the compiled SQL (always present, even on failure)
+// result.source  → 'pre_aggregate' | 'proxy' | null (if not executed)
+// result.warning → string | null (e.g., 'Query not covered by pre-aggregates. Configure a proxy...')
 ```
 
 **Query flow:**
@@ -65,12 +67,12 @@ const result = await client.query({
    a. Fetch the Parquet file from `baseUrl + cache_key + '.parquet'` (if not already in IndexedDB)
    b. Load into DuckDB WASM as `"__cache"` table
    c. Execute the reagg SQL
-   d. Return rows with `source: 'pre_aggregate'`
+   d. Return `{ ok: true, source: 'pre_aggregate', rows, columns, sql }`
 3. If no pre-aggregate covers the query and proxy is configured:
    a. POST `{ sql, dialect, datasource }` to the proxy URL
    b. Proxy executes against the warehouse, returns `{ rows, columns }`
-   c. Return rows with `source: 'proxy'`
-4. If no pre-aggregate and no proxy: throw error with the compiled SQL (so the caller can handle it)
+   c. Return `{ ok: true, source: 'proxy', rows, columns, sql }`
+4. If no pre-aggregate and no proxy: return `{ ok: false, source: null, rows: [], columns: [], sql, warning }` — the warning explains what happened and includes the compiled SQL so the caller can display it or handle it gracefully
 
 #### `client.inspect()`
 
