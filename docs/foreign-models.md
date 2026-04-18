@@ -347,6 +347,48 @@ These tests:
 3. Execute the SQL against the same Postgres database
 4. Verify results match expected hand-written SQL queries
 
+## WASM / Library Usage
+
+Foreign model support is available in the WASM package via feature flags. Each format can be included independently to minimize binary size:
+
+```bash
+# LookML only
+wasm-pack build --target web --no-default-features --features wasm,foreign-lookml
+
+# All formats
+wasm-pack build --target web --no-default-features --features wasm,foreign
+```
+
+The `compile_foreign` function compiles queries directly from foreign model files:
+
+```js
+import init, { compile_foreign } from 'airlayer';
+await init();
+
+const result = compile_foreign(
+  'lookml',                           // format
+  [viewLkml, exploreLkml],            // array of file content strings
+  JSON.stringify({                    // query JSON
+    measures: ['orders.count'],
+    dimensions: ['orders.status'],
+  }),
+  'postgres'                          // dialect
+);
+console.log(result.sql);
+```
+
+Available feature flags:
+
+| Feature | Format | Adds |
+|---------|--------|------|
+| `foreign-cube` | Cube.js | `cube.rs` parser |
+| `foreign-lookml` | LookML | `lookml.rs` parser (custom DSL parser) |
+| `foreign-dbt` | dbt MetricFlow | `dbt.rs` parser |
+| `foreign-omni` | Omni | `omni.rs` parser |
+| `foreign` | All formats | All of the above |
+
+The CLI includes all formats by default (`cli` depends on `foreign`).
+
 ## Limitations
 
 - **LookML Liquid templating** is not supported. Liquid `{% %}` / `{{ }}` blocks in SQL expressions are passed through as-is.

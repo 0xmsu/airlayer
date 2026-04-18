@@ -127,6 +127,13 @@ exec-sqlite     = [rusqlite]
 exec-domo       = [ureq]
 exec-motherduck = [duckdb, exec-duckdb]   # ← depends on exec-duckdb for shared helpers
 exec            = all of the above
+
+foreign-cube    = []                      # Cube.js parser
+foreign-lookml  = []                      # LookML parser
+foreign-dbt     = []                      # dbt MetricFlow parser
+foreign-omni    = []                      # Omni parser
+foreign         = all of the above
+cli             = [clap, console, ..., foreign]  # ← includes all foreign parsers
 ```
 
 ## Key design decisions
