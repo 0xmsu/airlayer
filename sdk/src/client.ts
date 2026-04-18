@@ -63,7 +63,8 @@ export class AirlayerClient {
         duckdb = await DuckDBManager.create();
       }
 
-      const storage: StorageEngine = this.deps?.storage ?? (await createIDBStorage());
+      const { IDBStorage } = await import('./idb-storage');
+      const storage: StorageEngine = this.deps?.storage ?? new IDBStorage();
 
       this.preaggStore = new PreAggregateStore({
         manifest: manifestJson,
@@ -179,10 +180,3 @@ function kindToType(kind: string): string {
   }
 }
 
-async function createIDBStorage(): Promise<StorageEngine> {
-  const idb = await import('idb-keyval');
-  return {
-    get: (key: string) => idb.get(key),
-    set: (key: string, value: Uint8Array) => idb.set(key, value),
-  };
-}
