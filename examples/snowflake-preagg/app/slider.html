@@ -167,9 +167,15 @@ const COST_PER_CREDIT = 2;
 
 function dailyWarehouseCost(totalQueries, creditsPerHour) {
   if (totalQueries === 0) return 0;
+  // First warehouse: probabilistic overlap model (queries share 5-min windows)
   const pIdle = (WORKDAY_MINUTES - AUTOSUSPEND_MINUTES) / WORKDAY_MINUTES;
-  const activeMinutes = WORKDAY_MINUTES * (1 - Math.pow(pIdle, totalQueries));
-  return (activeMinutes / 60) * creditsPerHour * COST_PER_CREDIT;
+  const firstWhMinutes = WORKDAY_MINUTES * (1 - Math.pow(pIdle, totalQueries));
+  // Multi-cluster overflow: once one warehouse is saturated (always-on),
+  // excess query load spills to additional warehouses.
+  const demandMinutes = totalQueries * AUTOSUSPEND_MINUTES;
+  const overflowMinutes = Math.max(0, demandMinutes - WORKDAY_MINUTES);
+  const totalMinutes = firstWhMinutes + overflowMinutes;
+  return (totalMinutes / 60) * creditsPerHour * COST_PER_CREDIT;
 }
 
 let cachedQueryCount = 0;
