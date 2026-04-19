@@ -27,6 +27,11 @@
   .badge { display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: .75rem; font-weight: 600; }
   .badge-cached { background: #065f46; color: #6ee7b7; }
   .badge-raw { background: #7c2d12; color: #fdba74; }
+  .card-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: .5rem; }
+  .card-header h2 { margin-bottom: 0; }
+  .cost { font-size: .85rem; font-weight: 600; }
+  .cost-cached { color: #34d399; }
+  .cost-raw { color: #fb923c; }
   .timing { font-size: .85rem; color: #64748b; margin-bottom: 1rem; height: 1.2em; }
   .timing span { font-weight: 600; }
   .timing-cached span { color: #34d399; }
@@ -70,13 +75,19 @@
 
 <div class="grid">
   <div class="card">
-    <h2><span class="badge badge-cached">PRECOMPUTED</span> Airlayer with DuckDB</h2>
+    <div class="card-header">
+      <h2><span class="badge badge-cached">PRECOMPUTED</span> Airlayer with DuckDB</h2>
+      <div class="cost cost-cached" id="cached-cost">$0.00</div>
+    </div>
     <div class="timing timing-cached" id="cached-timing"></div>
     <div class="bar-chart" id="cached-bars"></div>
   </div>
 
   <div class="card" id="raw-card">
-    <h2><span class="badge badge-raw">RAW</span> Snowflake Direct</h2>
+    <div class="card-header">
+      <h2><span class="badge badge-raw">RAW</span> Snowflake Direct</h2>
+      <div class="cost cost-raw" id="raw-cost">$0.00</div>
+    </div>
     <div class="timing timing-raw" id="raw-timing"></div>
     <div class="bar-chart" id="raw-bars"></div>
     <div class="loading-overlay" id="raw-loading"><div class="spinner"></div></div>
@@ -212,6 +223,21 @@ async function runCached(endMonth) {
   }
 }
 
+// ── Cost tracking ────────────────────────────────────────────────────────────
+// Snowflake XS warehouse: 1 credit/hour ≈ $2/hour. Minimum billing: 1 second.
+const SF_COST_PER_SEC = 2 / 3600; // ~$0.000556/sec
+let cachedTotalCost = 0;
+let rawTotalCost = 0;
+let cachedQueryCount = 0;
+let rawQueryCount = 0;
+
+function updateCostDisplay() {
+  document.getElementById('cached-cost').textContent =
+    `$${cachedTotalCost.toFixed(4)} (${cachedQueryCount} queries)`;
+  document.getElementById('raw-cost').textContent =
+    `$${rawTotalCost.toFixed(4)} (${rawQueryCount} queries)`;
+}
+
 // ── Raw query (slow) ─────────────────────────────────────────────────────────
 let rawAbort = null;
 let rawRequestId = 0;
@@ -244,6 +270,9 @@ async function runRaw(endMonth) {
     document.getElementById('raw-loading').classList.remove('visible');
 
     if (result.error) { console.error(result.error); return; }
+    rawQueryCount++;
+    rawTotalCost += Math.max(elapsed / 1000, 1) * SF_COST_PER_SEC;
+    updateCostDisplay();
     renderBars('raw-bars', result.rows, 'bar-fill-raw');
     document.getElementById('raw-timing').innerHTML = `<span>${Math.round(elapsed)} ms</span>`;
   } catch (e) {
@@ -302,6 +331,9 @@ function onSliderChange(month) {
   // Cached: run immediately (instant)
   runCached(month).then((result) => {
     if (!result) return;
+    cachedQueryCount++;
+    // Local DuckDB: no warehouse cost
+    updateCostDisplay();
     renderBars('cached-bars', result.rows, 'bar-fill-cached');
     document.getElementById('cached-timing').innerHTML = `<span>${Math.round(result.elapsed)} ms</span>`;
   });
