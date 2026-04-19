@@ -2124,10 +2124,12 @@ fn run_execute(
                         {
                             if let Ok(duck_conn) = duckdb::Connection::open_in_memory() {
                                 if let Ok(mut stmt) = duck_conn.prepare(&reagg_sql) {
-                                    let columns: Vec<String> = (0..stmt.column_count())
-                                        .map(|i| stmt.column_name(i).map_or("?", |v| v).to_string())
-                                        .collect();
                                     if let Ok(mut duckdb_rows) = stmt.query([]) {
+                                        // Get columns after execution (DuckDB 1.x panics if called before)
+                                        let columns: Vec<String> = duckdb_rows
+                                            .as_ref()
+                                            .map(|r| r.column_names().iter().map(|s| s.to_string()).collect())
+                                            .unwrap_or_default();
                                         let mut rows = Vec::new();
                                         loop {
                                             match duckdb_rows.next() {

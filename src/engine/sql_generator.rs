@@ -1141,29 +1141,28 @@ impl<'a> SqlGenerator<'a> {
             }
         }
 
+        // Only include the time column in SELECT/GROUP BY when a granularity
+        // is requested.  Without granularity the time dimension is filter-only
+        // (the date_range WHERE clause is added separately).
         if let Some(ref granularity) = td.granularity {
             col_expr = self.dialect.date_trunc(granularity, &col_expr);
+
+            let member_path = format!("{}.{}", td.dimension, granularity);
+            let col_alias = self.member_alias(&member_path);
+
+            let idx = builder.select_columns.len();
+            builder.select_columns.push(SelectColumn {
+                expr: col_expr,
+                alias: col_alias.clone(),
+                is_aggregate: false,
+            });
+            builder.group_by_indices.push(idx);
+            builder.columns.push(ColumnMeta {
+                member: member_path,
+                alias: col_alias,
+                kind: ColumnKind::TimeDimension,
+            });
         }
-
-        let member_path = if let Some(ref g) = td.granularity {
-            format!("{}.{}", td.dimension, g)
-        } else {
-            td.dimension.clone()
-        };
-        let col_alias = self.member_alias(&member_path);
-
-        let idx = builder.select_columns.len();
-        builder.select_columns.push(SelectColumn {
-            expr: col_expr,
-            alias: col_alias.clone(),
-            is_aggregate: false,
-        });
-        builder.group_by_indices.push(idx);
-        builder.columns.push(ColumnMeta {
-            member: member_path,
-            alias: col_alias,
-            kind: ColumnKind::TimeDimension,
-        });
 
         Ok(())
     }

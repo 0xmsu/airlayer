@@ -1,0 +1,319 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>airlayer — Interactive Filter Demo</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #0f172a; color: #e2e8f0; padding: 2rem; }
+  h1 { font-size: 1.5rem; margin-bottom: .25rem; }
+  .subtitle { color: #94a3b8; margin-bottom: 1.5rem; }
+  nav { margin-bottom: 2rem; }
+  nav a { color: #3b82f6; text-decoration: none; font-size: .85rem; }
+  nav a:hover { text-decoration: underline; }
+  .init-status { color: #94a3b8; font-size: .85rem; margin-bottom: 1.5rem; }
+  .error { color: #f87171; }
+
+  .slider-section { margin-bottom: 2rem; text-align: center; }
+  .slider-label { font-size: 1.1rem; margin-bottom: .5rem; }
+  .slider-value { font-size: 1.8rem; font-weight: 700; color: #e2e8f0; margin-bottom: .75rem; }
+  input[type=range] { width: 400px; max-width: 80%; accent-color: #3b82f6; cursor: pointer; }
+  .month-ticks { display: flex; justify-content: space-between; width: 400px; max-width: 80%; margin: .5rem auto 0; font-size: .7rem; color: #64748b; }
+
+  .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 1.5rem; }
+  .card { background: #1e293b; border-radius: 12px; padding: 1.5rem; border: 1px solid #334155; position: relative; min-height: 300px; }
+  .card h2 { font-size: 1rem; margin-bottom: .5rem; }
+  .badge { display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: .75rem; font-weight: 600; }
+  .badge-cached { background: #065f46; color: #6ee7b7; }
+  .badge-raw { background: #7c2d12; color: #fdba74; }
+  .timing { font-size: .85rem; color: #64748b; margin-bottom: 1rem; height: 1.2em; }
+  .timing span { font-weight: 600; }
+  .timing-cached span { color: #34d399; }
+  .timing-raw span { color: #fb923c; }
+
+  .bar-chart { display: flex; flex-direction: column; gap: .6rem; }
+  .bar-row { display: flex; align-items: center; gap: .75rem; }
+  .bar-label { width: 80px; font-size: .8rem; color: #94a3b8; text-align: right; flex-shrink: 0; }
+  .bar-track { flex: 1; height: 28px; background: #0f172a; border-radius: 6px; overflow: hidden; position: relative; }
+  .bar-fill { height: 100%; border-radius: 6px; transition: width 0.15s ease-out; display: flex; align-items: center; padding-left: 8px; font-size: .75rem; font-weight: 600; min-width: 0; }
+  .bar-fill-cached { background: linear-gradient(90deg, #065f46, #059669); color: #d1fae5; }
+  .bar-fill-raw { background: linear-gradient(90deg, #7c2d12, #c2410c); color: #fed7aa; }
+  .bar-amount { font-size: .8rem; color: #94a3b8; width: 80px; text-align: right; flex-shrink: 0; }
+
+  .loading-overlay { position: absolute; inset: 0; background: rgba(15, 23, 42, 0.7); border-radius: 12px; display: flex; align-items: center; justify-content: center; opacity: 0; pointer-events: none; transition: opacity 0.15s; }
+  .loading-overlay.visible { opacity: 1; }
+  .spinner { width: 24px; height: 24px; border: 3px solid #475569; border-top-color: #fb923c; border-radius: 50%; animation: spin 0.8s linear infinite; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+</style>
+</head>
+<body>
+
+<nav><a href="/">&larr; Back to query comparison</a></nav>
+<h1>Interactive Filter Demo</h1>
+<p class="subtitle">Ramen shop revenue by store format (5,000 stores) — drag the slider to filter by date range</p>
+<div class="init-status" id="init-status">Loading SDK...</div>
+
+<div class="slider-section">
+  <div class="slider-label">Showing revenue through:</div>
+  <div class="slider-value" id="slider-value">Dec 2024</div>
+  <input type="range" id="month-slider" min="1" max="60" value="60" disabled />
+  <div class="month-ticks">
+    <span>Jan 2020</span><span></span><span></span><span></span><span></span>
+    <span>Jan 2021</span><span></span><span></span><span></span><span></span>
+    <span>Jan 2022</span><span></span><span></span><span></span><span></span>
+    <span>Jan 2023</span><span></span><span></span><span></span><span></span>
+    <span>Jan 2024</span><span></span><span></span><span></span><span></span>
+    <span>Dec 2024</span>
+  </div>
+</div>
+
+<div class="grid">
+  <div class="card">
+    <h2><span class="badge badge-cached">PRECOMPUTED</span> Airlayer with DuckDB</h2>
+    <div class="timing timing-cached" id="cached-timing"></div>
+    <div class="bar-chart" id="cached-bars"></div>
+  </div>
+
+  <div class="card" id="raw-card">
+    <h2><span class="badge badge-raw">RAW</span> Snowflake Direct</h2>
+    <div class="timing timing-raw" id="raw-timing"></div>
+    <div class="bar-chart" id="raw-bars"></div>
+    <div class="loading-overlay" id="raw-loading"><div class="spinner"></div></div>
+  </div>
+</div>
+
+<script type="module">
+import init, * as wasm from '/public/wasm/airlayer.js';
+
+const MONTHS = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+const YEARS = [2020, 2021, 2022, 2023, 2024];
+const initStatus = document.getElementById('init-status');
+const slider = document.getElementById('month-slider');
+const sliderValue = document.getElementById('slider-value');
+
+let viewYaml = '';
+let manifestJson = '';
+let parquetFiles = {};
+let duckdb = null;
+
+// ── Initialize ───────────────────────────────────────────────────────────────
+async function initialize() {
+  try {
+    initStatus.textContent = 'Loading WASM...';
+    await init('/public/wasm/airlayer_bg.wasm');
+
+    initStatus.textContent = 'Loading view definition...';
+    viewYaml = await (await fetch('/public/data/events.view.yml')).text();
+
+    initStatus.textContent = 'Loading pre-aggregate manifest...';
+    manifestJson = await (await fetch('/public/data/manifest.json')).text();
+    const manifest = JSON.parse(manifestJson);
+
+    initStatus.textContent = 'Loading Parquet files...';
+    for (const rollup of manifest.rollups) {
+      const resp = await fetch(`/public/data/${rollup.file}`);
+      parquetFiles[rollup.file] = new Uint8Array(await resp.arrayBuffer());
+    }
+
+    initStatus.textContent = 'Initializing DuckDB...';
+    const DUCKDB_CDN = 'https://cdn.jsdelivr.net/npm/@duckdb/duckdb-wasm@1.28.0/dist';
+    const duckdbModule = await import('https://cdn.jsdelivr.net/npm/@duckdb/duckdb-wasm@1.28.0/+esm');
+    const bundle = await duckdbModule.selectBundle({
+      mvp: {
+        mainModule: `${DUCKDB_CDN}/duckdb-mvp.wasm`,
+        mainWorker: `${DUCKDB_CDN}/duckdb-browser-mvp.worker.js`,
+      },
+      eh: {
+        mainModule: `${DUCKDB_CDN}/duckdb-eh.wasm`,
+        mainWorker: `${DUCKDB_CDN}/duckdb-browser-eh.worker.js`,
+      },
+    });
+    const worker = await duckdbModule.createWorker(bundle.mainWorker);
+    const logger = new duckdbModule.ConsoleLogger();
+    duckdb = new duckdbModule.AsyncDuckDB(logger, worker);
+    await duckdb.instantiate(bundle.mainModule);
+
+    initStatus.textContent = 'Ready. Drag the slider.';
+    initStatus.style.color = '#34d399';
+    slider.disabled = false;
+
+    // Initial render (position 60 = Dec 2024)
+    onSliderChange(60);
+  } catch (err) {
+    initStatus.textContent = `Init failed: ${err.message}`;
+    initStatus.classList.add('error');
+    console.error(err);
+  }
+}
+
+// ── Build query for a given slider position (1–60 = Jan 2020 – Dec 2024) ────
+function sliderToDate(pos) {
+  const year = 2020 + Math.floor((pos - 1) / 12);
+  const month = ((pos - 1) % 12) + 1;
+  const lastDay = new Date(year, month, 0).getDate(); // last day of month
+  return `${year}-${String(month).padStart(2, '0')}-${String(lastDay).padStart(2, '0')}`;
+}
+
+function sliderToLabel(pos) {
+  const year = 2020 + Math.floor((pos - 1) / 12);
+  const month = ((pos - 1) % 12);
+  return `${MONTHS[month]} ${year}`;
+}
+
+function buildQuery(pos) {
+  const endDate = sliderToDate(pos);
+  return {
+    measures: ['sales.total_revenue', 'sales.total_orders'],
+    dimensions: ['sales.store_format'],
+    time_dimensions: [{
+      dimension: 'sales.date',
+      date_range: ['2020-01-01', endDate],
+    }],
+    order: [{ id: 'sales.total_revenue', desc: true }],
+  };
+}
+
+// Inline ? placeholders with param values (SQL standard quoting)
+function inlineParams(sql, params) {
+  let result = sql;
+  for (const p of params) {
+    result = result.replace('?', `'${p.replace(/'/g, "''")}'`);
+  }
+  return result;
+}
+
+// ── Cached query (instant) ───────────────────────────────────────────────────
+async function runCached(endMonth) {
+  const query = buildQuery(endMonth);
+  const queryJson = JSON.stringify(query);
+  const t0 = performance.now();
+
+  const resolution = wasm.cache_resolve(manifestJson, queryJson);
+  if (!resolution) return null;
+
+  const conn = await duckdb.connect();
+  try {
+    const parquetData = parquetFiles[resolution.entry.file];
+    await duckdb.registerFileBuffer(resolution.cache_key + '.parquet', parquetData.slice());
+    await conn.query(`CREATE OR REPLACE TABLE __cache AS SELECT * FROM '${resolution.cache_key}.parquet'`);
+    const result = await conn.query(resolution.reagg_sql);
+    const elapsed = performance.now() - t0;
+    const rows = result.toArray().map((r) => {
+      const obj = r.toJSON();
+      for (const [k, v] of Object.entries(obj)) {
+        if (typeof v === 'bigint') obj[k] = Number(v);
+      }
+      return obj;
+    });
+    return { rows, elapsed };
+  } finally {
+    await conn.close();
+  }
+}
+
+// ── Raw query (slow) ─────────────────────────────────────────────────────────
+let rawAbort = null;
+let rawRequestId = 0;
+
+async function runRaw(endMonth) {
+  const id = ++rawRequestId;
+  if (rawAbort) rawAbort.abort();
+  rawAbort = new AbortController();
+
+  const query = buildQuery(endMonth);
+  const queryJson = JSON.stringify(query);
+  const compiled = wasm.compile([viewYaml], queryJson, 'snowflake');
+  const sql = inlineParams(compiled.sql, compiled.params || []);
+
+  document.getElementById('raw-loading').classList.add('visible');
+
+  const t0 = performance.now();
+  try {
+    const resp = await fetch('/api/query', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ sql, dialect: 'snowflake' }),
+      signal: rawAbort.signal,
+    });
+    const result = await resp.json();
+    const elapsed = performance.now() - t0;
+
+    // Only render if this is still the latest request
+    if (id !== rawRequestId) return;
+    document.getElementById('raw-loading').classList.remove('visible');
+
+    if (result.error) { console.error(result.error); return; }
+    renderBars('raw-bars', result.rows, 'bar-fill-raw');
+    document.getElementById('raw-timing').innerHTML = `<span>${Math.round(elapsed)} ms</span>`;
+  } catch (e) {
+    if (e.name === 'AbortError') return;
+    if (id === rawRequestId) document.getElementById('raw-loading').classList.remove('visible');
+    console.error(e);
+  }
+}
+
+// ── Render bars ──────────────────────────────────────────────────────────────
+// Global max revenue — set from the first (full-range) render so bars shrink
+// as the date range narrows.
+let globalMaxRevenue = 0;
+
+function renderBars(containerId, rows, fillClass) {
+  if (!rows || !rows.length) {
+    document.getElementById(containerId).innerHTML = '<p style="color:#64748b">No data</p>';
+    return;
+  }
+
+  // Find column keys (could be lowercase or UPPERCASE from Snowflake)
+  const revenueKey = Object.keys(rows[0]).find((k) => k.toLowerCase().includes('revenue'));
+  const regionKey = Object.keys(rows[0]).find((k) => k.toLowerCase().includes('store_format') || k.toLowerCase().includes('region'));
+  const ordersKey = Object.keys(rows[0]).find((k) => k.toLowerCase().includes('order'));
+  if (!revenueKey || !regionKey) return;
+
+  const localMax = Math.max(...rows.map((r) => Number(r[revenueKey]) || 0));
+  if (localMax > globalMaxRevenue) globalMaxRevenue = localMax;
+  const maxRevenue = globalMaxRevenue;
+
+  let html = '';
+  for (const row of rows) {
+    const revenue = Number(row[revenueKey]) || 0;
+    const region = row[regionKey];
+    const orders = ordersKey ? (Number(row[ordersKey]) || 0) : 0;
+    const pct = maxRevenue > 0 ? (revenue / maxRevenue) * 100 : 0;
+    const formatted = revenue >= 1e6 ? `$${(revenue / 1e6).toFixed(1)}M` : `$${revenue.toLocaleString()}`;
+    html += `
+      <div class="bar-row">
+        <div class="bar-label">${region}</div>
+        <div class="bar-track">
+          <div class="bar-fill ${fillClass}" style="width:${pct}%">${orders > 0 ? orders.toLocaleString() + ' orders' : ''}</div>
+        </div>
+        <div class="bar-amount">${formatted}</div>
+      </div>`;
+  }
+  document.getElementById(containerId).innerHTML = html;
+}
+
+// ── Slider handler ───────────────────────────────────────────────────────────
+let debounceRaw = null;
+
+function onSliderChange(month) {
+  sliderValue.textContent = sliderToLabel(month);
+
+  // Cached: run immediately (instant)
+  runCached(month).then((result) => {
+    if (!result) return;
+    renderBars('cached-bars', result.rows, 'bar-fill-cached');
+    document.getElementById('cached-timing').innerHTML = `<span>${Math.round(result.elapsed)} ms</span>`;
+  });
+
+  // Raw: debounce 300ms so we don't fire on every pixel of slider movement
+  clearTimeout(debounceRaw);
+  document.getElementById('raw-loading').classList.add('visible');
+  debounceRaw = setTimeout(() => runRaw(month), 300);
+}
+
+slider.addEventListener('input', (e) => onSliderChange(Number(e.target.value)));
+initialize();
+</script>
+</body>
+</html>
