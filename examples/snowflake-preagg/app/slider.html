@@ -15,11 +15,14 @@
   .init-status { color: #94a3b8; font-size: .85rem; margin-bottom: 1.5rem; }
   .error { color: #f87171; }
 
-  .slider-section { margin-bottom: 2rem; text-align: center; }
-  .slider-label { font-size: 1.1rem; margin-bottom: .5rem; }
-  .slider-value { font-size: 1.8rem; font-weight: 700; color: #e2e8f0; margin-bottom: .75rem; }
-  input[type=range] { width: 400px; max-width: 80%; accent-color: #3b82f6; cursor: pointer; }
-  .month-ticks { display: flex; justify-content: space-between; width: 400px; max-width: 80%; margin: .5rem auto 0; font-size: .7rem; color: #64748b; }
+  .controls { display: flex; gap: 2rem; margin-bottom: 2rem; align-items: flex-start; flex-wrap: wrap; }
+  .control-group { flex: 1; min-width: 250px; text-align: center; }
+  .control-group.date-control { flex: 2; min-width: 350px; }
+  .control-label { font-size: .85rem; color: #94a3b8; margin-bottom: .25rem; }
+  .control-value { font-size: 1.4rem; font-weight: 700; color: #e2e8f0; margin-bottom: .5rem; }
+  .control-value .unit { font-size: .85rem; font-weight: 400; color: #94a3b8; }
+  input[type=range] { width: 100%; accent-color: #3b82f6; cursor: pointer; }
+  .range-labels { display: flex; justify-content: space-between; font-size: .65rem; color: #64748b; margin-top: .25rem; }
 
   .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 1.5rem; }
   .card { background: #1e293b; border-radius: 12px; padding: 1.5rem; border: 1px solid #334155; position: relative; min-height: 300px; }
@@ -29,13 +32,13 @@
   .badge-raw { background: #7c2d12; color: #fdba74; }
   .card-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: .5rem; }
   .card-header h2 { margin-bottom: 0; }
-  .cost { font-size: .85rem; font-weight: 600; }
+  .cost { font-size: .9rem; font-weight: 700; }
   .cost-cached { color: #34d399; }
   .cost-raw { color: #fb923c; }
-  .timing { font-size: .85rem; color: #64748b; margin-bottom: 1rem; height: 1.2em; }
-  .timing span { font-weight: 600; }
-  .timing-cached span { color: #34d399; }
-  .timing-raw span { color: #fb923c; }
+  .meta-row { display: flex; gap: 1.5rem; font-size: .8rem; color: #64748b; margin-bottom: 1rem; }
+  .meta-row span { font-weight: 600; }
+  .meta-row .cached-val { color: #34d399; }
+  .meta-row .raw-val { color: #fb923c; }
 
   .bar-chart { display: flex; flex-direction: column; gap: .6rem; }
   .bar-row { display: flex; align-items: center; gap: .75rem; }
@@ -56,30 +59,42 @@
 
 <nav><a href="/">&larr; Back to query comparison</a></nav>
 <h1>Interactive Filter Demo</h1>
-<p class="subtitle">Ramen shop revenue by store format (5,000 stores) — drag the slider to filter by date range</p>
+<p class="subtitle">Ramen shop revenue by store format (5,000 stores) — drag the sliders to explore</p>
 <div class="init-status" id="init-status">Loading SDK...</div>
 
-<div class="slider-section">
-  <div class="slider-label">Showing revenue through:</div>
-  <div class="slider-value" id="slider-value">Dec 2024</div>
-  <input type="range" id="month-slider" min="1" max="60" value="60" disabled />
-  <div class="month-ticks">
-    <span>Jan 2020</span><span></span><span></span><span></span><span></span>
-    <span>Jan 2021</span><span></span><span></span><span></span><span></span>
-    <span>Jan 2022</span><span></span><span></span><span></span><span></span>
-    <span>Jan 2023</span><span></span><span></span><span></span><span></span>
-    <span>Jan 2024</span><span></span><span></span><span></span><span></span>
-    <span>Dec 2024</span>
+<div class="controls">
+  <div class="control-group date-control">
+    <div class="control-label">Showing revenue through:</div>
+    <div class="control-value" id="date-value">Dec 2024</div>
+    <input type="range" id="month-slider" min="1" max="60" value="60" disabled />
+    <div class="range-labels">
+      <span>Jan 2020</span><span>Jan 2022</span><span>Jan 2024</span><span>Dec 2024</span>
+    </div>
+  </div>
+  <div class="control-group">
+    <div class="control-label">Concurrent users:</div>
+    <div class="control-value"><span id="users-value">1</span></div>
+    <input type="range" id="users-slider" min="0" max="30" value="0" />
+    <div class="range-labels"><span>1</span><span>10</span><span>100</span><span>1,000</span></div>
+  </div>
+  <div class="control-group">
+    <div class="control-label">Source data size:</div>
+    <div class="control-value"><span id="data-value">10M</span> <span class="unit">rows</span></div>
+    <input type="range" id="data-slider" min="0" max="30" value="0" />
+    <div class="range-labels"><span>10M</span><span>100M</span><span>1B</span><span>10B</span></div>
   </div>
 </div>
 
 <div class="grid">
   <div class="card">
     <div class="card-header">
-      <h2><span class="badge badge-cached">PRECOMPUTED</span> Airlayer with DuckDB</h2>
+      <h2><span class="badge badge-cached">PRECOMPUTED</span> Airlayer + DuckDB</h2>
       <div class="cost cost-cached" id="cached-cost">$0.00</div>
     </div>
-    <div class="timing timing-cached" id="cached-timing"></div>
+    <div class="meta-row">
+      <div>Latency: <span class="cached-val" id="cached-timing">—</span></div>
+      <div>Queries: <span class="cached-val" id="cached-queries">0</span></div>
+    </div>
     <div class="bar-chart" id="cached-bars"></div>
   </div>
 
@@ -88,7 +103,10 @@
       <h2><span class="badge badge-raw">RAW</span> Snowflake Direct</h2>
       <div class="cost cost-raw" id="raw-cost">$0.00</div>
     </div>
-    <div class="timing timing-raw" id="raw-timing"></div>
+    <div class="meta-row">
+      <div>Latency: <span class="raw-val" id="raw-timing">—</span></div>
+      <div>Queries: <span class="raw-val" id="raw-queries">0</span></div>
+    </div>
     <div class="bar-chart" id="raw-bars"></div>
     <div class="loading-overlay" id="raw-loading"><div class="spinner"></div></div>
   </div>
@@ -98,15 +116,102 @@
 import init, * as wasm from '/public/wasm/airlayer.js';
 
 const MONTHS = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
-const YEARS = [2020, 2021, 2022, 2023, 2024];
 const initStatus = document.getElementById('init-status');
-const slider = document.getElementById('month-slider');
-const sliderValue = document.getElementById('slider-value');
+const monthSlider = document.getElementById('month-slider');
+const usersSlider = document.getElementById('users-slider');
+const dataSlider = document.getElementById('data-slider');
 
 let viewYaml = '';
 let manifestJson = '';
 let parquetFiles = {};
 let duckdb = null;
+
+// ── Simulation parameters ────────────────────────────────────────────────────
+// Users slider: 0–30 maps exponentially to 1–1000
+function getUserCount() {
+  return Math.round(Math.pow(10, usersSlider.value / 10));
+}
+// Data slider: 0–30 maps exponentially to 1x–1000x (10M–10B rows)
+function getDataMultiplier() {
+  return Math.pow(10, dataSlider.value / 10);
+}
+function formatRows(multiplier) {
+  const rows = multiplier * 10_000_000;
+  if (rows >= 1e9) return `${(rows / 1e9).toFixed(rows >= 10e9 ? 0 : 1)}B`;
+  if (rows >= 1e6) return `${(rows / 1e6).toFixed(rows >= 100e6 ? 0 : 0)}M`;
+  return `${(rows / 1e3).toFixed(0)}K`;
+}
+
+// ── Latency projection ──────────────────────────────────────────────────────
+// Snowflake: full table scan scales ~linearly with data (sublinear with 0.8 exponent
+// due to partition pruning). XS warehouse queues at ~8 concurrent queries.
+function projectSnowflakeMs(observedMs, dataMultiplier, users) {
+  const dataFactor = Math.pow(dataMultiplier, 0.8);
+  const queueFactor = Math.max(1, Math.ceil(users / 8));
+  return observedMs * dataFactor * queueFactor;
+}
+// DuckDB preagg: table is ~300 rows regardless of source data. Parquet file
+// grows slightly with more granules. Nearly constant.
+function projectDuckdbMs(observedMs, dataMultiplier) {
+  return observedMs * (1 + Math.log10(Math.max(dataMultiplier, 1)) * 0.15);
+}
+
+// ── Cost tracking ────────────────────────────────────────────────────────────
+// Snowflake billing model:
+//   - Warehouse has 5-min auto-suspend (minimum billing window)
+//   - Credits/hour scales with warehouse size: XS=1, S=2, M=4, L=8
+//   - $2/credit
+//   - Queries are modeled as evenly distributed over an 8-hour workday (480 min)
+//   - Warehouse uptime = 480 * (1 - (475/480)^totalQueries) minutes
+//     (probabilistic: each query keeps warehouse up for 5 min)
+const WORKDAY_MINUTES = 480;
+const AUTOSUSPEND_MINUTES = 5;
+const COST_PER_CREDIT = 2;
+
+// Warehouse size needed for data scale: XS→S→M→L as data grows 10x each
+function warehouseCreditsPerHour(dataMultiplier) {
+  const tier = Math.floor(Math.log10(Math.max(dataMultiplier, 1)));
+  return Math.pow(2, Math.min(tier, 3)); // XS=1, S=2, M=4, L=8
+}
+function warehouseLabel(dataMultiplier) {
+  const tier = Math.floor(Math.log10(Math.max(dataMultiplier, 1)));
+  return ['XS', 'S', 'M', 'L', 'XL'][Math.min(tier, 4)];
+}
+
+// Daily warehouse cost given total queries spread over 8 hours
+function dailyWarehouseCost(totalQueries, dataMultiplier) {
+  if (totalQueries === 0) return 0;
+  const p = (WORKDAY_MINUTES - AUTOSUSPEND_MINUTES) / WORKDAY_MINUTES;
+  const activeMinutes = WORKDAY_MINUTES * (1 - Math.pow(p, totalQueries));
+  const credits = warehouseCreditsPerHour(dataMultiplier);
+  return (activeMinutes / 60) * credits * COST_PER_CREDIT;
+}
+
+let cachedQueryCount = 0;
+let rawQueryCount = 0;
+
+function formatCost(cost) {
+  if (cost >= 100) return `$${cost.toFixed(0)}`;
+  if (cost >= 1) return `$${cost.toFixed(2)}`;
+  return `$${cost.toFixed(2)}`;
+}
+
+function formatMs(ms) {
+  if (ms >= 60000) return `${(ms / 60000).toFixed(1)}m`;
+  if (ms >= 1000) return `${(ms / 1000).toFixed(1)}s`;
+  return `${Math.round(ms)}ms`;
+}
+
+function updateCostDisplay() {
+  const dataMult = getDataMultiplier();
+  const rawDailyCost = dailyWarehouseCost(rawQueryCount, dataMult);
+  const wh = warehouseLabel(dataMult);
+  document.getElementById('cached-cost').textContent = '$0.00';
+  document.getElementById('raw-cost').textContent =
+    `${formatCost(rawDailyCost)}/day (${wh})`;
+  document.getElementById('cached-queries').textContent = cachedQueryCount.toLocaleString();
+  document.getElementById('raw-queries').textContent = rawQueryCount.toLocaleString();
+}
 
 // ── Initialize ───────────────────────────────────────────────────────────────
 async function initialize() {
@@ -145,12 +250,11 @@ async function initialize() {
     duckdb = new duckdbModule.AsyncDuckDB(logger, worker);
     await duckdb.instantiate(bundle.mainModule);
 
-    initStatus.textContent = 'Ready. Drag the slider.';
+    initStatus.textContent = 'Ready. Drag the sliders.';
     initStatus.style.color = '#34d399';
-    slider.disabled = false;
+    monthSlider.disabled = false;
 
-    // Initial render (position 60 = Dec 2024)
-    onSliderChange(60);
+    onDateChange(60);
   } catch (err) {
     initStatus.textContent = `Init failed: ${err.message}`;
     initStatus.classList.add('error');
@@ -158,34 +262,27 @@ async function initialize() {
   }
 }
 
-// ── Build query for a given slider position (1–60 = Jan 2020 – Dec 2024) ────
+// ── Build query ──────────────────────────────────────────────────────────────
 function sliderToDate(pos) {
   const year = 2020 + Math.floor((pos - 1) / 12);
   const month = ((pos - 1) % 12) + 1;
-  const lastDay = new Date(year, month, 0).getDate(); // last day of month
+  const lastDay = new Date(year, month, 0).getDate();
   return `${year}-${String(month).padStart(2, '0')}-${String(lastDay).padStart(2, '0')}`;
 }
-
 function sliderToLabel(pos) {
   const year = 2020 + Math.floor((pos - 1) / 12);
   const month = ((pos - 1) % 12);
   return `${MONTHS[month]} ${year}`;
 }
-
 function buildQuery(pos) {
   const endDate = sliderToDate(pos);
   return {
     measures: ['sales.total_revenue', 'sales.total_orders'],
     dimensions: ['sales.store_format'],
-    time_dimensions: [{
-      dimension: 'sales.date',
-      date_range: ['2020-01-01', endDate],
-    }],
+    time_dimensions: [{ dimension: 'sales.date', date_range: ['2020-01-01', endDate] }],
     order: [{ id: 'sales.total_revenue', desc: true }],
   };
 }
-
-// Inline ? placeholders with param values (SQL standard quoting)
 function inlineParams(sql, params) {
   let result = sql;
   for (const p of params) {
@@ -194,7 +291,7 @@ function inlineParams(sql, params) {
   return result;
 }
 
-// ── Cached query (instant) ───────────────────────────────────────────────────
+// ── Cached query ─────────────────────────────────────────────────────────────
 async function runCached(endMonth) {
   const query = buildQuery(endMonth);
   const queryJson = JSON.stringify(query);
@@ -209,7 +306,7 @@ async function runCached(endMonth) {
     await duckdb.registerFileBuffer(resolution.cache_key + '.parquet', parquetData.slice());
     await conn.query(`CREATE OR REPLACE TABLE __cache AS SELECT * FROM '${resolution.cache_key}.parquet'`);
     const result = await conn.query(resolution.reagg_sql);
-    const elapsed = performance.now() - t0;
+    const observedMs = performance.now() - t0;
     const rows = result.toArray().map((r) => {
       const obj = r.toJSON();
       for (const [k, v] of Object.entries(obj)) {
@@ -217,28 +314,26 @@ async function runCached(endMonth) {
       }
       return obj;
     });
-    return { rows, elapsed };
+
+    const dataMult = getDataMultiplier();
+    const users = getUserCount();
+    const projectedMs = projectDuckdbMs(observedMs, dataMult);
+
+    // Emulate projected latency (add artificial delay)
+    const extraDelay = projectedMs - observedMs;
+    if (extraDelay > 1) await new Promise((r) => setTimeout(r, extraDelay));
+
+    cachedQueryCount += users;
+    // DuckDB is local — no warehouse cost
+    updateCostDisplay();
+
+    return { rows, projectedMs };
   } finally {
     await conn.close();
   }
 }
 
-// ── Cost tracking ────────────────────────────────────────────────────────────
-// Snowflake XS warehouse: 1 credit/hour ≈ $2/hour. Minimum billing: 1 second.
-const SF_COST_PER_SEC = 2 / 3600; // ~$0.000556/sec
-let cachedTotalCost = 0;
-let rawTotalCost = 0;
-let cachedQueryCount = 0;
-let rawQueryCount = 0;
-
-function updateCostDisplay() {
-  document.getElementById('cached-cost').textContent =
-    `$${cachedTotalCost.toFixed(4)} (${cachedQueryCount} queries)`;
-  document.getElementById('raw-cost').textContent =
-    `$${rawTotalCost.toFixed(4)} (${rawQueryCount} queries)`;
-}
-
-// ── Raw query (slow) ─────────────────────────────────────────────────────────
+// ── Raw query ────────────────────────────────────────────────────────────────
 let rawAbort = null;
 let rawRequestId = 0;
 
@@ -263,18 +358,25 @@ async function runRaw(endMonth) {
       signal: rawAbort.signal,
     });
     const result = await resp.json();
-    const elapsed = performance.now() - t0;
+    const observedMs = performance.now() - t0;
 
-    // Only render if this is still the latest request
     if (id !== rawRequestId) return;
     document.getElementById('raw-loading').classList.remove('visible');
-
     if (result.error) { console.error(result.error); return; }
-    rawQueryCount++;
-    rawTotalCost += Math.max(elapsed / 1000, 1) * SF_COST_PER_SEC;
+
+    const dataMult = getDataMultiplier();
+    const users = getUserCount();
+    const projectedMs = projectSnowflakeMs(observedMs, dataMult, users);
+
+    rawQueryCount += users;
     updateCostDisplay();
+
     renderBars('raw-bars', result.rows, 'bar-fill-raw');
-    document.getElementById('raw-timing').innerHTML = `<span>${Math.round(elapsed)} ms</span>`;
+    document.getElementById('raw-timing').innerHTML =
+      `<span>${formatMs(projectedMs)}</span>` +
+      (dataMult > 1.1 || users > 1
+        ? ` <span style="color:#64748b;font-weight:400">(actual: ${formatMs(observedMs)})</span>`
+        : '');
   } catch (e) {
     if (e.name === 'AbortError') return;
     if (id === rawRequestId) document.getElementById('raw-loading').classList.remove('visible');
@@ -283,8 +385,6 @@ async function runRaw(endMonth) {
 }
 
 // ── Render bars ──────────────────────────────────────────────────────────────
-// Global max revenue — set from the first (full-range) render so bars shrink
-// as the date range narrows.
 let globalMaxRevenue = 0;
 
 function renderBars(containerId, rows, fillClass) {
@@ -293,7 +393,6 @@ function renderBars(containerId, rows, fillClass) {
     return;
   }
 
-  // Find column keys (could be lowercase or UPPERCASE from Snowflake)
   const revenueKey = Object.keys(rows[0]).find((k) => k.toLowerCase().includes('revenue'));
   const regionKey = Object.keys(rows[0]).find((k) => k.toLowerCase().includes('store_format') || k.toLowerCase().includes('region'));
   const ordersKey = Object.keys(rows[0]).find((k) => k.toLowerCase().includes('order'));
@@ -322,29 +421,38 @@ function renderBars(containerId, rows, fillClass) {
   document.getElementById(containerId).innerHTML = html;
 }
 
-// ── Slider handler ───────────────────────────────────────────────────────────
+// ── Event handlers ───────────────────────────────────────────────────────────
 let debounceRaw = null;
 
-function onSliderChange(month) {
-  sliderValue.textContent = sliderToLabel(month);
+function onDateChange(month) {
+  document.getElementById('date-value').textContent = sliderToLabel(month);
 
-  // Cached: run immediately (instant)
   runCached(month).then((result) => {
     if (!result) return;
-    cachedQueryCount++;
-    // Local DuckDB: no warehouse cost
-    updateCostDisplay();
     renderBars('cached-bars', result.rows, 'bar-fill-cached');
-    document.getElementById('cached-timing').innerHTML = `<span>${Math.round(result.elapsed)} ms</span>`;
+    const dataMult = getDataMultiplier();
+    document.getElementById('cached-timing').innerHTML =
+      `<span>${formatMs(result.projectedMs)}</span>` +
+      (dataMult > 1.1
+        ? ` <span style="color:#64748b;font-weight:400">(at ${formatRows(dataMult)} rows)</span>`
+        : '');
   });
 
-  // Raw: debounce 300ms so we don't fire on every pixel of slider movement
   clearTimeout(debounceRaw);
   document.getElementById('raw-loading').classList.add('visible');
   debounceRaw = setTimeout(() => runRaw(month), 300);
 }
 
-slider.addEventListener('input', (e) => onSliderChange(Number(e.target.value)));
+function onSimChange() {
+  document.getElementById('users-value').textContent = getUserCount().toLocaleString();
+  document.getElementById('data-value').textContent = formatRows(getDataMultiplier());
+  updateCostDisplay();
+}
+
+monthSlider.addEventListener('input', (e) => onDateChange(Number(e.target.value)));
+usersSlider.addEventListener('input', onSimChange);
+dataSlider.addEventListener('input', onSimChange);
+
 initialize();
 </script>
 </body>
