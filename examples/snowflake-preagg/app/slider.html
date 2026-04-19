@@ -81,6 +81,11 @@
       <div class="sim-val" id="users-value">1</div>
     </div>
     <div class="sim-row">
+      <label>Queries/day</label>
+      <input type="range" id="queries-slider" min="1" max="100" value="20" />
+      <div class="sim-val" id="queries-value">20</div>
+    </div>
+    <div class="sim-row">
       <label>Warehouse</label>
       <select id="warehouse-select">
         <option value="1" selected>XS (1 credit/hr)</option>
@@ -136,6 +141,7 @@ const MONTHS = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov
 const initStatus = document.getElementById('init-status');
 const monthSlider = document.getElementById('month-slider');
 const usersSlider = document.getElementById('users-slider');
+const queriesSlider = document.getElementById('queries-slider');
 const warehouseSelect = document.getElementById('warehouse-select');
 
 let viewYaml = '';
@@ -152,39 +158,37 @@ function getCreditsPerHour() {
 }
 
 // ── Cost tracking ────────────────────────────────────────────────────────────
-// Snowflake warehouse billing:
-//   - $2/credit
-//   - 5-min auto-suspend: each query keeps the warehouse running for at least
-//     5 minutes. If the next query arrives within that window, no new startup.
-//   - Model: N queries from all users spread evenly over an 8-hour workday.
-//     Each query "covers" a 5-min window. Warehouse uptime is the fraction
-//     of the day covered by at least one window:
-//       activeMinutes = 480 * (1 - (475/480)^N)
-//   - Cost accumulates with every query — more queries = more uptime.
-const WORKDAY_MINUTES = 480;
-const AUTOSUSPEND_MINUTES = 5;
+// Snowflake per-second billing:
+//   cost per query = (seconds/query) / 3600 × credits/hour × $/credit
+// Accumulated across all queries × simulated user count.
+// Annual projection = accumulated cost per query × queries/user/day × 365
 const COST_PER_CREDIT = 2;
 
-function dailyWarehouseCost(totalQueries, creditsPerHour) {
-  if (totalQueries === 0) return 0;
-  // First warehouse: probabilistic overlap model (queries share 5-min windows)
-  const pIdle = (WORKDAY_MINUTES - AUTOSUSPEND_MINUTES) / WORKDAY_MINUTES;
-  const firstWhMinutes = WORKDAY_MINUTES * (1 - Math.pow(pIdle, totalQueries));
-  // Multi-cluster overflow: once one warehouse is saturated (always-on),
-  // excess query load spills to additional warehouses.
-  const demandMinutes = totalQueries * AUTOSUSPEND_MINUTES;
-  const overflowMinutes = Math.max(0, demandMinutes - WORKDAY_MINUTES);
-  const totalMinutes = firstWhMinutes + overflowMinutes;
-  return (totalMinutes / 60) * creditsPerHour * COST_PER_CREDIT;
-}
-
+// Running totals: each Snowflake query adds its cost (latency-based × users)
+let accumulatedComputeSeconds = 0;  // total compute seconds (latency × users)
 let cachedQueryCount = 0;
 let rawQueryCount = 0;
 
-function formatCost(cost) {
-  if (cost >= 100) return `$${cost.toFixed(0)}`;
-  if (cost >= 1) return `$${cost.toFixed(2)}`;
-  return `$${cost.toFixed(2)}`;
+function addQueryCost(latencyMs) {
+  const users = getUserCount();
+  accumulatedComputeSeconds += (latencyMs / 1000) * users;
+}
+
+// Annual projection: extrapolate from per-query cost observed so far
+function projectedAnnualCost() {
+  if (rawQueryCount === 0) return 0;
+  const avgSecondsPerQuery = accumulatedComputeSeconds / rawQueryCount;
+  const users = getUserCount();
+  const queriesPerDay = Number(document.getElementById('queries-slider').value);
+  const creditsPerHour = getCreditsPerHour();
+  const computeHoursPerDay = (users * queriesPerDay * avgSecondsPerQuery) / 3600;
+  return computeHoursPerDay * creditsPerHour * COST_PER_CREDIT * 365;
+}
+
+function formatAnnualCost(cost) {
+  if (cost >= 1e6) return `$${(cost / 1e6).toFixed(1)}M/yr`;
+  if (cost >= 1e3) return `$${(cost / 1e3).toFixed(0)}k/yr`;
+  return `$${cost.toFixed(0)}/yr`;
 }
 
 function formatMs(ms) {
@@ -194,11 +198,9 @@ function formatMs(ms) {
 }
 
 function updateCostDisplay() {
-  const credits = getCreditsPerHour();
-  const rawDailyCost = dailyWarehouseCost(rawQueryCount, credits);
-  document.getElementById('cached-cost').textContent = '$0.00';
-  document.getElementById('raw-cost').textContent =
-    `${formatCost(rawDailyCost)}/day`;
+  const annual = projectedAnnualCost();
+  document.getElementById('cached-cost').textContent = '$0/yr';
+  document.getElementById('raw-cost').textContent = rawQueryCount > 0 ? formatAnnualCost(annual) : '$0/yr';
   document.getElementById('cached-queries').textContent = cachedQueryCount.toLocaleString();
   document.getElementById('raw-queries').textContent = rawQueryCount.toLocaleString();
 }
@@ -348,6 +350,7 @@ async function runRaw(endMonth) {
 
     const users = getUserCount();
     rawQueryCount += users;
+    addQueryCost(elapsed);
     updateCostDisplay();
 
     renderBars('raw-bars', result.rows, 'bar-fill-raw');
@@ -415,11 +418,13 @@ function onDateChange(month) {
 
 function onSimChange() {
   document.getElementById('users-value').textContent = getUserCount().toLocaleString();
+  document.getElementById('queries-value').textContent = queriesSlider.value;
   updateCostDisplay();
 }
 
 monthSlider.addEventListener('input', (e) => onDateChange(Number(e.target.value)));
 usersSlider.addEventListener('input', onSimChange);
+queriesSlider.addEventListener('input', onSimChange);
 warehouseSelect.addEventListener('change', onSimChange);
 
 initialize();
