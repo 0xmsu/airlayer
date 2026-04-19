@@ -23,8 +23,7 @@
 
   .sim-panel { background: #1a1a2e; border: 1px dashed #475569; border-radius: 8px; padding: 1rem 1.5rem; margin-bottom: 2rem; }
   .sim-header { font-size: .75rem; text-transform: uppercase; letter-spacing: .08em; color: #64748b; margin-bottom: .75rem; }
-  .sim-controls { display: flex; gap: 2rem; align-items: flex-start; }
-  .sim-group { flex: 1; min-width: 200px; }
+  .sim-group { max-width: 350px; }
   .sim-group .sim-label { font-size: .8rem; color: #94a3b8; margin-bottom: .2rem; }
   .sim-group .sim-value { font-size: 1.1rem; font-weight: 700; color: #e2e8f0; margin-bottom: .4rem; }
   .sim-group .sim-value .unit { font-size: .75rem; font-weight: 400; color: #64748b; }
@@ -65,7 +64,7 @@
 
 <nav><a href="/">&larr; Back to query comparison</a></nav>
 <h1>Interactive Filter Demo</h1>
-<p class="subtitle">Ramen shop revenue by store format (5,000 stores) — drag the sliders to explore</p>
+<p class="subtitle">Ramen shop revenue by store format (5,000 stores) — drag the slider to explore</p>
 <div class="init-status" id="init-status">Loading SDK...</div>
 
 <div class="slider-section">
@@ -79,19 +78,11 @@
 
 <div class="sim-panel">
   <div class="sim-header">Cost simulation</div>
-  <div class="sim-controls">
-    <div class="sim-group">
-      <div class="sim-label">Daily active users</div>
-      <div class="sim-value"><span id="users-value">1</span> <span class="unit">users/day</span></div>
-      <input type="range" id="users-slider" min="0" max="30" value="0" />
-      <div class="range-labels"><span>1</span><span>10</span><span>100</span><span>1,000</span></div>
-    </div>
-    <div class="sim-group">
-      <div class="sim-label">Source data size</div>
-      <div class="sim-value"><span id="data-value">10M</span> <span class="unit">rows</span></div>
-      <input type="range" id="data-slider" min="0" max="30" value="0" />
-      <div class="range-labels"><span>10M</span><span>100M</span><span>1B</span><span>10B</span></div>
-    </div>
+  <div class="sim-group">
+    <div class="sim-label">Daily active users</div>
+    <div class="sim-value"><span id="users-value">1</span> <span class="unit">users/day</span></div>
+    <input type="range" id="users-slider" min="0" max="30" value="0" />
+    <div class="range-labels"><span>1</span><span>10</span><span>100</span><span>1,000</span></div>
   </div>
 </div>
 
@@ -102,7 +93,7 @@
       <div class="cost cost-cached" id="cached-cost">$0.00</div>
     </div>
     <div class="meta-row">
-      <div>Latency: <span class="cached-val" id="cached-timing">—</span></div>
+      <div>Latency: <span class="cached-val" id="cached-timing">&mdash;</span></div>
       <div>Queries: <span class="cached-val" id="cached-queries">0</span></div>
     </div>
     <div class="bar-chart" id="cached-bars"></div>
@@ -114,7 +105,7 @@
       <div class="cost cost-raw" id="raw-cost">$0.00</div>
     </div>
     <div class="meta-row">
-      <div>Latency: <span class="raw-val" id="raw-timing">—</span></div>
+      <div>Latency: <span class="raw-val" id="raw-timing">&mdash;</span></div>
       <div>Queries: <span class="raw-val" id="raw-queries">0</span></div>
     </div>
     <div class="bar-chart" id="raw-bars"></div>
@@ -129,7 +120,6 @@ const MONTHS = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov
 const initStatus = document.getElementById('init-status');
 const monthSlider = document.getElementById('month-slider');
 const usersSlider = document.getElementById('users-slider');
-const dataSlider = document.getElementById('data-slider');
 
 let viewYaml = '';
 let manifestJson = '';
@@ -141,60 +131,27 @@ let duckdb = null;
 function getUserCount() {
   return Math.round(Math.pow(10, usersSlider.value / 10));
 }
-// Data slider: 0–30 maps exponentially to 1x–1000x (10M–10B rows)
-function getDataMultiplier() {
-  return Math.pow(10, dataSlider.value / 10);
-}
-function formatRows(multiplier) {
-  const rows = multiplier * 10_000_000;
-  if (rows >= 1e9) return `${(rows / 1e9).toFixed(rows >= 10e9 ? 0 : 1)}B`;
-  if (rows >= 1e6) return `${(rows / 1e6).toFixed(rows >= 100e6 ? 0 : 0)}M`;
-  return `${(rows / 1e3).toFixed(0)}K`;
-}
-
-// ── Latency projection ──────────────────────────────────────────────────────
-// Snowflake: full table scan scales ~linearly with data (sublinear with 0.8 exponent
-// due to partition pruning). XS warehouse queues at ~8 concurrent queries.
-function projectSnowflakeMs(observedMs, dataMultiplier, users) {
-  const dataFactor = Math.pow(dataMultiplier, 0.8);
-  const queueFactor = Math.max(1, Math.ceil(users / 8));
-  return observedMs * dataFactor * queueFactor;
-}
-// DuckDB preagg: table is ~300 rows regardless of source data. Parquet file
-// grows slightly with more granules. Nearly constant.
-function projectDuckdbMs(observedMs, dataMultiplier) {
-  return observedMs * (1 + Math.log10(Math.max(dataMultiplier, 1)) * 0.15);
-}
 
 // ── Cost tracking ────────────────────────────────────────────────────────────
-// Snowflake billing model:
-//   - Warehouse has 5-min auto-suspend (minimum billing window)
-//   - Credits/hour scales with warehouse size: XS=1, S=2, M=4, L=8
-//   - $2/credit
-//   - Queries are modeled as evenly distributed over an 8-hour workday (480 min)
-//   - Warehouse uptime = 480 * (1 - (475/480)^totalQueries) minutes
-//     (probabilistic: each query keeps warehouse up for 5 min)
+// Snowflake XS warehouse billing:
+//   - 1 credit/hour, $2/credit
+//   - 5-min auto-suspend: each query keeps the warehouse running for at least
+//     5 minutes. If the next query arrives within that window, no new startup.
+//   - Model: N queries from all users spread evenly over an 8-hour workday.
+//     Each query "covers" a 5-min window. Warehouse uptime is the fraction
+//     of the day covered by at least one window:
+//       activeMinutes = 480 * (1 - (475/480)^N)
+//   - Cost accumulates with every query — more queries = more uptime.
 const WORKDAY_MINUTES = 480;
 const AUTOSUSPEND_MINUTES = 5;
+const CREDITS_PER_HOUR = 1; // XS warehouse
 const COST_PER_CREDIT = 2;
 
-// Warehouse size needed for data scale: XS→S→M→L as data grows 10x each
-function warehouseCreditsPerHour(dataMultiplier) {
-  const tier = Math.floor(Math.log10(Math.max(dataMultiplier, 1)));
-  return Math.pow(2, Math.min(tier, 3)); // XS=1, S=2, M=4, L=8
-}
-function warehouseLabel(dataMultiplier) {
-  const tier = Math.floor(Math.log10(Math.max(dataMultiplier, 1)));
-  return ['XS', 'S', 'M', 'L', 'XL'][Math.min(tier, 4)];
-}
-
-// Daily warehouse cost given total queries spread over 8 hours
-function dailyWarehouseCost(totalQueries, dataMultiplier) {
+function dailyWarehouseCost(totalQueries) {
   if (totalQueries === 0) return 0;
-  const p = (WORKDAY_MINUTES - AUTOSUSPEND_MINUTES) / WORKDAY_MINUTES;
-  const activeMinutes = WORKDAY_MINUTES * (1 - Math.pow(p, totalQueries));
-  const credits = warehouseCreditsPerHour(dataMultiplier);
-  return (activeMinutes / 60) * credits * COST_PER_CREDIT;
+  const pIdle = (WORKDAY_MINUTES - AUTOSUSPEND_MINUTES) / WORKDAY_MINUTES;
+  const activeMinutes = WORKDAY_MINUTES * (1 - Math.pow(pIdle, totalQueries));
+  return (activeMinutes / 60) * CREDITS_PER_HOUR * COST_PER_CREDIT;
 }
 
 let cachedQueryCount = 0;
@@ -213,12 +170,10 @@ function formatMs(ms) {
 }
 
 function updateCostDisplay() {
-  const dataMult = getDataMultiplier();
-  const rawDailyCost = dailyWarehouseCost(rawQueryCount, dataMult);
-  const wh = warehouseLabel(dataMult);
+  const rawDailyCost = dailyWarehouseCost(rawQueryCount);
   document.getElementById('cached-cost').textContent = '$0.00';
   document.getElementById('raw-cost').textContent =
-    `${formatCost(rawDailyCost)}/day (${wh})`;
+    `${formatCost(rawDailyCost)}/day`;
   document.getElementById('cached-queries').textContent = cachedQueryCount.toLocaleString();
   document.getElementById('raw-queries').textContent = rawQueryCount.toLocaleString();
 }
@@ -260,7 +215,7 @@ async function initialize() {
     duckdb = new duckdbModule.AsyncDuckDB(logger, worker);
     await duckdb.instantiate(bundle.mainModule);
 
-    initStatus.textContent = 'Ready. Drag the sliders.';
+    initStatus.textContent = 'Ready. Drag the slider.';
     initStatus.style.color = '#34d399';
     monthSlider.disabled = false;
 
@@ -316,7 +271,7 @@ async function runCached(endMonth) {
     await duckdb.registerFileBuffer(resolution.cache_key + '.parquet', parquetData.slice());
     await conn.query(`CREATE OR REPLACE TABLE __cache AS SELECT * FROM '${resolution.cache_key}.parquet'`);
     const result = await conn.query(resolution.reagg_sql);
-    const observedMs = performance.now() - t0;
+    const elapsed = performance.now() - t0;
     const rows = result.toArray().map((r) => {
       const obj = r.toJSON();
       for (const [k, v] of Object.entries(obj)) {
@@ -325,19 +280,11 @@ async function runCached(endMonth) {
       return obj;
     });
 
-    const dataMult = getDataMultiplier();
     const users = getUserCount();
-    const projectedMs = projectDuckdbMs(observedMs, dataMult);
-
-    // Emulate projected latency (add artificial delay)
-    const extraDelay = projectedMs - observedMs;
-    if (extraDelay > 1) await new Promise((r) => setTimeout(r, extraDelay));
-
     cachedQueryCount += users;
-    // DuckDB is local — no warehouse cost
     updateCostDisplay();
 
-    return { rows, projectedMs };
+    return { rows, elapsed };
   } finally {
     await conn.close();
   }
@@ -368,25 +315,18 @@ async function runRaw(endMonth) {
       signal: rawAbort.signal,
     });
     const result = await resp.json();
-    const observedMs = performance.now() - t0;
+    const elapsed = performance.now() - t0;
 
     if (id !== rawRequestId) return;
     document.getElementById('raw-loading').classList.remove('visible');
     if (result.error) { console.error(result.error); return; }
 
-    const dataMult = getDataMultiplier();
     const users = getUserCount();
-    const projectedMs = projectSnowflakeMs(observedMs, dataMult, users);
-
     rawQueryCount += users;
     updateCostDisplay();
 
     renderBars('raw-bars', result.rows, 'bar-fill-raw');
-    document.getElementById('raw-timing').innerHTML =
-      `<span>${formatMs(projectedMs)}</span>` +
-      (dataMult > 1.1 || users > 1
-        ? ` <span style="color:#64748b;font-weight:400">(actual: ${formatMs(observedMs)})</span>`
-        : '');
+    document.getElementById('raw-timing').innerHTML = `<span>${formatMs(elapsed)}</span>`;
   } catch (e) {
     if (e.name === 'AbortError') return;
     if (id === rawRequestId) document.getElementById('raw-loading').classList.remove('visible');
@@ -440,12 +380,7 @@ function onDateChange(month) {
   runCached(month).then((result) => {
     if (!result) return;
     renderBars('cached-bars', result.rows, 'bar-fill-cached');
-    const dataMult = getDataMultiplier();
-    document.getElementById('cached-timing').innerHTML =
-      `<span>${formatMs(result.projectedMs)}</span>` +
-      (dataMult > 1.1
-        ? ` <span style="color:#64748b;font-weight:400">(at ${formatRows(dataMult)} rows)</span>`
-        : '');
+    document.getElementById('cached-timing').innerHTML = `<span>${formatMs(result.elapsed)}</span>`;
   });
 
   clearTimeout(debounceRaw);
@@ -453,15 +388,13 @@ function onDateChange(month) {
   debounceRaw = setTimeout(() => runRaw(month), 300);
 }
 
-function onSimChange() {
+function onUsersChange() {
   document.getElementById('users-value').textContent = getUserCount().toLocaleString();
-  document.getElementById('data-value').textContent = formatRows(getDataMultiplier());
   updateCostDisplay();
 }
 
 monthSlider.addEventListener('input', (e) => onDateChange(Number(e.target.value)));
-usersSlider.addEventListener('input', onSimChange);
-dataSlider.addEventListener('input', onSimChange);
+usersSlider.addEventListener('input', onUsersChange);
 
 initialize();
 </script>
