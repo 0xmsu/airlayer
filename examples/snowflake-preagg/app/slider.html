@@ -15,14 +15,20 @@
   .init-status { color: #94a3b8; font-size: .85rem; margin-bottom: 1.5rem; }
   .error { color: #f87171; }
 
-  .controls { display: flex; gap: 2rem; margin-bottom: 2rem; align-items: flex-start; flex-wrap: wrap; }
-  .control-group { flex: 1; min-width: 250px; text-align: center; }
-  .control-group.date-control { flex: 2; min-width: 350px; }
-  .control-label { font-size: .85rem; color: #94a3b8; margin-bottom: .25rem; }
-  .control-value { font-size: 1.4rem; font-weight: 700; color: #e2e8f0; margin-bottom: .5rem; }
-  .control-value .unit { font-size: .85rem; font-weight: 400; color: #94a3b8; }
+  .slider-section { margin-bottom: 2rem; text-align: center; }
+  .slider-label { font-size: .85rem; color: #94a3b8; margin-bottom: .25rem; }
+  .slider-value { font-size: 1.8rem; font-weight: 700; color: #e2e8f0; margin-bottom: .5rem; }
   input[type=range] { width: 100%; accent-color: #3b82f6; cursor: pointer; }
   .range-labels { display: flex; justify-content: space-between; font-size: .65rem; color: #64748b; margin-top: .25rem; }
+
+  .sim-panel { background: #1a1a2e; border: 1px dashed #475569; border-radius: 8px; padding: 1rem 1.5rem; margin-bottom: 2rem; }
+  .sim-header { font-size: .75rem; text-transform: uppercase; letter-spacing: .08em; color: #64748b; margin-bottom: .75rem; }
+  .sim-controls { display: flex; gap: 2rem; align-items: flex-start; }
+  .sim-group { flex: 1; min-width: 200px; }
+  .sim-group .sim-label { font-size: .8rem; color: #94a3b8; margin-bottom: .2rem; }
+  .sim-group .sim-value { font-size: 1.1rem; font-weight: 700; color: #e2e8f0; margin-bottom: .4rem; }
+  .sim-group .sim-value .unit { font-size: .75rem; font-weight: 400; color: #64748b; }
+  .sim-group input[type=range] { accent-color: #8b5cf6; }
 
   .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 1.5rem; }
   .card { background: #1e293b; border-radius: 12px; padding: 1.5rem; border: 1px solid #334155; position: relative; min-height: 300px; }
@@ -62,26 +68,30 @@
 <p class="subtitle">Ramen shop revenue by store format (5,000 stores) — drag the sliders to explore</p>
 <div class="init-status" id="init-status">Loading SDK...</div>
 
-<div class="controls">
-  <div class="control-group date-control">
-    <div class="control-label">Showing revenue through:</div>
-    <div class="control-value" id="date-value">Dec 2024</div>
-    <input type="range" id="month-slider" min="1" max="60" value="60" disabled />
-    <div class="range-labels">
-      <span>Jan 2020</span><span>Jan 2022</span><span>Jan 2024</span><span>Dec 2024</span>
+<div class="slider-section">
+  <div class="slider-label">Showing revenue through:</div>
+  <div class="slider-value" id="date-value">Dec 2024</div>
+  <input type="range" id="month-slider" min="1" max="60" value="60" disabled style="width:400px;max-width:80%" />
+  <div class="range-labels" style="width:400px;max-width:80%;margin:.5rem auto 0">
+    <span>Jan 2020</span><span>Jan 2022</span><span>Jan 2024</span><span>Dec 2024</span>
+  </div>
+</div>
+
+<div class="sim-panel">
+  <div class="sim-header">Cost simulation</div>
+  <div class="sim-controls">
+    <div class="sim-group">
+      <div class="sim-label">Daily active users</div>
+      <div class="sim-value"><span id="users-value">1</span> <span class="unit">users/day</span></div>
+      <input type="range" id="users-slider" min="0" max="30" value="0" />
+      <div class="range-labels"><span>1</span><span>10</span><span>100</span><span>1,000</span></div>
     </div>
-  </div>
-  <div class="control-group">
-    <div class="control-label">Concurrent users:</div>
-    <div class="control-value"><span id="users-value">1</span></div>
-    <input type="range" id="users-slider" min="0" max="30" value="0" />
-    <div class="range-labels"><span>1</span><span>10</span><span>100</span><span>1,000</span></div>
-  </div>
-  <div class="control-group">
-    <div class="control-label">Source data size:</div>
-    <div class="control-value"><span id="data-value">10M</span> <span class="unit">rows</span></div>
-    <input type="range" id="data-slider" min="0" max="30" value="0" />
-    <div class="range-labels"><span>10M</span><span>100M</span><span>1B</span><span>10B</span></div>
+    <div class="sim-group">
+      <div class="sim-label">Source data size</div>
+      <div class="sim-value"><span id="data-value">10M</span> <span class="unit">rows</span></div>
+      <input type="range" id="data-slider" min="0" max="30" value="0" />
+      <div class="range-labels"><span>10M</span><span>100M</span><span>1B</span><span>10B</span></div>
+    </div>
   </div>
 </div>
 
