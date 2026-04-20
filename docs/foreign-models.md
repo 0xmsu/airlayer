@@ -1,6 +1,6 @@
 # Foreign Semantic Model Support
 
-airlayer works out of the box with Cube.js, Looker LookML, dbt MetricFlow, and Omni repositories. Just point airlayer at a directory containing foreign model files and query directly — no conversion step required.
+airlayer works out of the box with Cube.js, Looker LookML, dbt MetricFlow, and Omni repositories — no conversion step required. Run `airlayer init` inside an existing repo to set up your database connection, then query directly.
 
 ## Supported Formats
 
@@ -13,23 +13,29 @@ airlayer works out of the box with Cube.js, Looker LookML, dbt MetricFlow, and O
 
 ## Quick Start
 
-### Query directly from any format (no conversion needed)
+### Setup
+
+Run `airlayer init` inside an existing foreign model repo. It auto-detects the format, extracts connection details from repo-specific files (dbt `profiles.yml`, Cube `.env`), and generates a `config.yml` with your database connection:
 
 ```bash
-# In a Cube.js project directory
-cd /path/to/cube-project
-airlayer query --measure orders.count --dimension orders.status
-
-# In a LookML project
 cd /path/to/lookml-project
-airlayer query --measure orders.total_revenue --dimension orders.status
+airlayer init
+# → Detected LookML project with 24 view files
+# → Generated config.yml
+```
 
-# In a dbt project with semantic models
-cd /path/to/dbt-project
-airlayer query --measure orders.order_count --dimension orders.status
+### Query directly (no conversion needed)
 
-# In an Omni project
-cd /path/to/omni-project
+Once initialized, query directly — airlayer auto-detects foreign model files and loads them natively:
+
+```bash
+# SQL compilation (no database connection needed, just --dialect)
+airlayer query --measure orders.count --dimension orders.status -d postgres
+
+# SQL execution (requires config.yml from airlayer init)
+airlayer query --measure orders.count --dimension orders.status -x
+
+# Inspect available views
 airlayer inspect
 ```
 
@@ -340,6 +346,48 @@ These tests:
 2. Compile queries to SQL using airlayer's engine
 3. Execute the SQL against the same Postgres database
 4. Verify results match expected hand-written SQL queries
+
+## WASM / Library Usage
+
+Foreign model support is available in the WASM package via feature flags. Each format can be included independently to minimize binary size:
+
+```bash
+# LookML only
+wasm-pack build --target web --no-default-features --features wasm,foreign-lookml
+
+# All formats
+wasm-pack build --target web --no-default-features --features wasm,foreign
+```
+
+The `compile_foreign` function compiles queries directly from foreign model files:
+
+```js
+import init, { compile_foreign } from 'airlayer';
+await init();
+
+const result = compile_foreign(
+  'lookml',                           // format
+  [viewLkml, exploreLkml],            // array of file content strings
+  JSON.stringify({                    // query JSON
+    measures: ['orders.count'],
+    dimensions: ['orders.status'],
+  }),
+  'postgres'                          // dialect
+);
+console.log(result.sql);
+```
+
+Available feature flags:
+
+| Feature | Format | Adds |
+|---------|--------|------|
+| `foreign-cube` | Cube.js | `cube.rs` parser |
+| `foreign-lookml` | LookML | `lookml.rs` parser (custom DSL parser) |
+| `foreign-dbt` | dbt MetricFlow | `dbt.rs` parser |
+| `foreign-omni` | Omni | `omni.rs` parser |
+| `foreign` | All formats | All of the above |
+
+The CLI includes all formats by default (`cli` depends on `foreign`).
 
 ## Limitations
 
