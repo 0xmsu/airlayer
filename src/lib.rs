@@ -1,3 +1,4 @@
+pub mod contrib;
 pub mod dialect;
 pub mod engine;
 pub mod schema;

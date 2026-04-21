@@ -29,6 +29,7 @@ just test-databricks      # tier 3: Databricks
 just test-motherduck      # tier 3: MotherDuck
 just test-cloud           # tier 3: all cloud warehouses
 
+just test-contrib          # contrib foreign model repo tests
 just test-all             # all tiers (Docker + cloud)
 ```
 
@@ -43,13 +44,14 @@ cargo test --features exec -- --include-ignored      # tier 1 + 2 + 3
 
 Full testing guide: **[docs/testing.md](docs/testing.md)**
 
-### Current test counts (302 total)
+### Current test counts (342 total)
 
 | Category | Count | What |
 |----------|-------|------|
-| Unit tests | 152 | SQL generation, profiling, joins, parsing, motifs, inline_params escaping |
+| Unit tests | 155 | SQL generation, profiling, joins, parsing, motifs, inline_params escaping, contrib manifest parsing |
 | Preagg unit tests | 59 | Hashing, rollup resolution, coverage, re-aggregation SQL, all-dialects build/manifest/reagg, filter rendering, ORDER BY, LIKE escaping, library API |
 | Tier 1 integration | 41 | DuckDB (12), SQLite (7), parse validation (4), motif compile (4), custom motif (3), saved query (2), preagg (9) |
+| Contrib tests | 40 | Generic runner (1 test, 4 repos), LookML parity (39 detailed per-field assertions) |
 | Tier 2 integration | 21 | Postgres (5), MySQL (2), ClickHouse (5), Presto (9) — all self-seeding |
 | Tier 3 integration | 29 | Snowflake (6), BigQuery (7), Databricks (8), MotherDuck (8) — all self-seeding |
 
@@ -100,11 +102,19 @@ src/
 tests/
 ├── integration_tests.rs    All integration tests (tier 1-3)
 ├── cube_parity_tests.rs    Cube.js conversion parity tests (tier 2)
+├── contrib_tests.rs        Generic test runner for contrib/ repos
+├── lookml_parity_tests.rs  LookML conversion parity tests (detailed per-field assertions)
 └── integration/
     ├── views/              Test .view.yml files (unqualified table names)
     ├── views-databricks/   Databricks-specific views (table: workspace.airlayer_test.events)
     ├── views-motherduck/   MotherDuck-specific views (table: analytics.events)
     └── seed/               Per-database seed SQL files (12-row events table)
+contrib/                        Community-contributed foreign model repos
+├── CLAUDE.md                   Instructions for contributors using Claude Code
+├── README.md                   Contribution guide and manifest reference
+├── <name>-<format>/            Each contributed repo
+│   ├── repo.yml                Manifest (format, expectations, known issues)
+│   └── *.lkml / *.yml          Model files
 .claude/
 ├── agents/                 Sub-agent specs (analyst, builder)
 └── skills/                 Claude Code agent skills (bootstrap, query, profile)
@@ -127,6 +137,13 @@ exec-sqlite     = [rusqlite]
 exec-domo       = [ureq]
 exec-motherduck = [duckdb, exec-duckdb]   # ← depends on exec-duckdb for shared helpers
 exec            = all of the above
+
+foreign-cube    = []                      # Cube.js parser
+foreign-lookml  = []                      # LookML parser
+foreign-dbt     = []                      # dbt MetricFlow parser
+foreign-omni    = []                      # Omni parser
+foreign         = all of the above
+cli             = [clap, console, ..., foreign]  # ← includes all foreign parsers
 ```
 
 ## Key design decisions
@@ -276,12 +293,17 @@ steps:
 
 ## Foreign semantic model support
 
-airlayer works out of the box with Cube.js, LookML, dbt MetricFlow, and Omni repositories. When no `.view.yml` files are found in a project directory, airlayer auto-detects foreign formats and loads them natively — no conversion step required.
+airlayer works out of the box with Cube.js, LookML, dbt MetricFlow, and Omni repositories. When no `.view.yml` files are found in a project directory, airlayer auto-detects foreign formats and loads them natively — no conversion step required. Run `airlayer init` inside the repo to set up `config.yml` with your database connection before executing queries.
 
 ```bash
-# Query directly from a Cube.js/LookML/dbt/Omni project
-cd /path/to/cube-project && airlayer query --measure orders.count
-cd /path/to/lookml-project && airlayer inspect
+# Initialize inside a foreign model repo (sets up config.yml)
+cd /path/to/lookml-project && airlayer init
+
+# SQL compilation works without config.yml (just needs --dialect)
+airlayer query --measure orders.count -d postgres
+
+# SQL execution requires config.yml (from airlayer init)
+airlayer query --measure orders.count -x
 
 # Explicit conversion (optional)
 airlayer convert --format cube ./cube_schema/ --output ./views/
@@ -297,7 +319,10 @@ Parsers live in `src/schema/foreign/` with per-format modules: `cube.rs`, `lookm
 ```bash
 cargo test --lib schema::foreign       # unit tests (59 tests)
 just test-cube-parity                  # Cube.js Docker parity tests (tier 2)
+just test-contrib                      # community-contributed repo tests
 ```
+
+Community-contributed repos live in `contrib/` — see `contrib/README.md` for how to add new repos.
 
 ## Reference material
 
