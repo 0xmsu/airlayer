@@ -36,7 +36,7 @@ use airlayer::schema::models::*;
 
 fn load_lookml_engine(fixture_dir: &str) -> SemanticEngine {
     let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/integration/lookml_repos")
+        .join("contrib")
         .join(fixture_dir);
 
     let result = foreign::convert_directory(foreign::ForeignFormat::LookML, &dir)
@@ -60,7 +60,7 @@ fn load_lookml_engine(fixture_dir: &str) -> SemanticEngine {
 
 #[test]
 fn lookml_jira_conversion_and_view_count() {
-    let engine = load_lookml_engine("jira");
+    let engine = load_lookml_engine("jira-lookml");
     assert!(
         engine.views().len() >= 4,
         "Jira should have at least 4 views, got {}",
@@ -82,7 +82,7 @@ fn lookml_jira_conversion_and_view_count() {
 
 #[test]
 fn lookml_jira_dimension_group_timeframes() {
-    let engine = load_lookml_engine("jira");
+    let engine = load_lookml_engine("jira-lookml");
     let issue = engine.view("issue").unwrap();
 
     // dimension_group: _fivetran_synced with 7 timeframes should expand
@@ -101,7 +101,7 @@ fn lookml_jira_dimension_group_timeframes() {
 
 #[test]
 fn lookml_jira_yesno_dimension() {
-    let engine = load_lookml_engine("jira");
+    let engine = load_lookml_engine("jira-lookml");
     let issue = engine.view("issue").unwrap();
 
     let needs_triage = issue
@@ -119,7 +119,7 @@ fn lookml_jira_yesno_dimension() {
 
 #[test]
 fn lookml_jira_measure_filters() {
-    let engine = load_lookml_engine("jira");
+    let engine = load_lookml_engine("jira-lookml");
     let issue = engine.view("issue").unwrap();
     let measures = issue.measures_list();
 
@@ -136,7 +136,7 @@ fn lookml_jira_measure_filters() {
 
 #[test]
 fn lookml_jira_explore_joins() {
-    let engine = load_lookml_engine("jira");
+    let engine = load_lookml_engine("jira-lookml");
     let issue = engine.view("issue").unwrap();
 
     // Explore should add foreign entities to the issue view
@@ -165,7 +165,7 @@ fn lookml_jira_explore_joins() {
 
 #[test]
 fn lookml_jira_compile_basic_query() {
-    let engine = load_lookml_engine("jira");
+    let engine = load_lookml_engine("jira-lookml");
 
     let request = QueryRequest {
         measures: vec!["issue.count".to_string()],
@@ -183,7 +183,7 @@ fn lookml_jira_compile_basic_query() {
 
 #[test]
 fn lookml_jira_compile_cross_view_query() {
-    let engine = load_lookml_engine("jira");
+    let engine = load_lookml_engine("jira-lookml");
 
     // Query that spans issue and priority views (via entity join)
     let request = QueryRequest {
@@ -202,7 +202,7 @@ fn lookml_jira_compile_cross_view_query() {
 
 #[test]
 fn lookml_jira_at_constant_in_table_name() {
-    let engine = load_lookml_engine("jira");
+    let engine = load_lookml_engine("jira-lookml");
     let issue = engine.view("issue").unwrap();
 
     // @{SCHEMA_NAME}.issue should be preserved as the table name
@@ -215,7 +215,7 @@ fn lookml_jira_at_constant_in_table_name() {
 
 #[test]
 fn lookml_jira_comment_on_code_line() {
-    let engine = load_lookml_engine("jira");
+    let engine = load_lookml_engine("jira-lookml");
     let issue = engine.view("issue").unwrap();
 
     // `#hidden: yes` is a comment — the status dimension should still exist
@@ -233,7 +233,7 @@ fn lookml_jira_comment_on_code_line() {
 
 #[test]
 fn lookml_google_ads_conversion_and_view_count() {
-    let engine = load_lookml_engine("google_ads");
+    let engine = load_lookml_engine("google-ads-lookml");
     assert!(
         engine.views().len() >= 3,
         "Google Ads should have at least 3 views, got {}",
@@ -243,7 +243,7 @@ fn lookml_google_ads_conversion_and_view_count() {
 
 #[test]
 fn lookml_google_ads_running_total_measure() {
-    let engine = load_lookml_engine("google_ads");
+    let engine = load_lookml_engine("google-ads-lookml");
     let base = engine
         .view("ad_metrics_base")
         .expect("Should have ad_metrics_base view");
@@ -259,7 +259,7 @@ fn lookml_google_ads_running_total_measure() {
 
 #[test]
 fn lookml_google_ads_count_distinct_measure() {
-    let engine = load_lookml_engine("google_ads");
+    let engine = load_lookml_engine("google-ads-lookml");
     let campaign = engine.view("campaign").expect("Should have campaign view");
 
     let measures = campaign.measures_list();
@@ -272,7 +272,7 @@ fn lookml_google_ads_count_distinct_measure() {
 
 #[test]
 fn lookml_google_ads_date_raw_dimension() {
-    let engine = load_lookml_engine("google_ads");
+    let engine = load_lookml_engine("google-ads-lookml");
     let impressions = engine
         .view("ad_impressions")
         .expect("Should have ad_impressions view");
@@ -288,7 +288,7 @@ fn lookml_google_ads_date_raw_dimension() {
 
 #[test]
 fn lookml_google_ads_dimension_group_many_timeframes() {
-    let engine = load_lookml_engine("google_ads");
+    let engine = load_lookml_engine("google-ads-lookml");
     let impressions = engine
         .view("ad_impressions")
         .expect("Should have ad_impressions view");
@@ -309,7 +309,7 @@ fn lookml_google_ads_dimension_group_many_timeframes() {
 
 #[test]
 fn lookml_google_ads_cross_ref_dimension() {
-    let engine = load_lookml_engine("google_ads");
+    let engine = load_lookml_engine("google-ads-lookml");
     let base = engine
         .view("ad_metrics_base")
         .expect("Should have ad_metrics_base view");
@@ -329,7 +329,7 @@ fn lookml_google_ads_cross_ref_dimension() {
 
 #[test]
 fn lookml_google_ads_compile_basic_query() {
-    let engine = load_lookml_engine("google_ads");
+    let engine = load_lookml_engine("google-ads-lookml");
 
     let request = QueryRequest {
         measures: vec!["ad_impressions.total_impressions".to_string()],
@@ -347,7 +347,7 @@ fn lookml_google_ads_compile_basic_query() {
 
 #[test]
 fn lookml_google_ads_compile_cross_view_query() {
-    let engine = load_lookml_engine("google_ads");
+    let engine = load_lookml_engine("google-ads-lookml");
 
     let request = QueryRequest {
         measures: vec!["ad_impressions.total_clicks".to_string()],
@@ -369,7 +369,7 @@ fn lookml_google_ads_compile_cross_view_query() {
 
 #[test]
 fn lookml_healthcare_conversion_and_view_count() {
-    let engine = load_lookml_engine("healthcare");
+    let engine = load_lookml_engine("healthcare-lookml");
     assert!(
         engine.views().len() >= 3,
         "Healthcare should have at least 3 views, got {}",
@@ -379,7 +379,7 @@ fn lookml_healthcare_conversion_and_view_count() {
 
 #[test]
 fn lookml_healthcare_yesno_dimension() {
-    let engine = load_lookml_engine("healthcare");
+    let engine = load_lookml_engine("healthcare-lookml");
     let patient = engine.view("patient").expect("Should have patient view");
 
     let is_deceased = patient
@@ -392,7 +392,7 @@ fn lookml_healthcare_yesno_dimension() {
 
 #[test]
 fn lookml_healthcare_zipcode_dimension() {
-    let engine = load_lookml_engine("healthcare");
+    let engine = load_lookml_engine("healthcare-lookml");
     let patient = engine.view("patient").expect("Should have patient view");
 
     let zip = patient
@@ -406,7 +406,7 @@ fn lookml_healthcare_zipcode_dimension() {
 
 #[test]
 fn lookml_healthcare_duration_dimension_group() {
-    let engine = load_lookml_engine("healthcare");
+    let engine = load_lookml_engine("healthcare-lookml");
     let encounter = engine
         .view("encounter")
         .expect("Should have encounter view");
@@ -436,7 +436,7 @@ fn lookml_healthcare_duration_dimension_group() {
 
 #[test]
 fn lookml_healthcare_measure_types() {
-    let engine = load_lookml_engine("healthcare");
+    let engine = load_lookml_engine("healthcare-lookml");
     let encounter = engine
         .view("encounter")
         .expect("Should have encounter view");
@@ -463,7 +463,7 @@ fn lookml_healthcare_measure_types() {
 
 #[test]
 fn lookml_healthcare_filtered_measures() {
-    let engine = load_lookml_engine("healthcare");
+    let engine = load_lookml_engine("healthcare-lookml");
     let patient = engine.view("patient").expect("Should have patient view");
     let measures = patient.measures_list();
 
@@ -479,7 +479,7 @@ fn lookml_healthcare_filtered_measures() {
 
 #[test]
 fn lookml_healthcare_explore_joins() {
-    let engine = load_lookml_engine("healthcare");
+    let engine = load_lookml_engine("healthcare-lookml");
     let encounter = engine
         .view("encounter")
         .expect("Should have encounter view");
@@ -499,7 +499,7 @@ fn lookml_healthcare_explore_joins() {
 
 #[test]
 fn lookml_healthcare_compile_encounter_by_class() {
-    let engine = load_lookml_engine("healthcare");
+    let engine = load_lookml_engine("healthcare-lookml");
 
     let request = QueryRequest {
         measures: vec!["encounter.count".to_string()],
@@ -514,7 +514,7 @@ fn lookml_healthcare_compile_encounter_by_class() {
 
 #[test]
 fn lookml_healthcare_compile_cross_view_patient_encounter() {
-    let engine = load_lookml_engine("healthcare");
+    let engine = load_lookml_engine("healthcare-lookml");
 
     let request = QueryRequest {
         measures: vec!["encounter.count".to_string()],
@@ -536,7 +536,7 @@ fn lookml_healthcare_compile_cross_view_patient_encounter() {
 
 #[test]
 fn lookml_sales_conversion_and_view_count() {
-    let engine = load_lookml_engine("sales");
+    let engine = load_lookml_engine("sales-lookml");
     assert!(
         engine.views().len() >= 2,
         "Sales should have at least 2 views, got {}",
@@ -546,7 +546,7 @@ fn lookml_sales_conversion_and_view_count() {
 
 #[test]
 fn lookml_sales_dimension_group_time() {
-    let engine = load_lookml_engine("sales");
+    let engine = load_lookml_engine("sales-lookml");
     let opportunity = engine
         .view("opportunity")
         .expect("Should have opportunity view");
@@ -567,7 +567,7 @@ fn lookml_sales_dimension_group_time() {
 
 #[test]
 fn lookml_sales_yesno_dimensions() {
-    let engine = load_lookml_engine("sales");
+    let engine = load_lookml_engine("sales-lookml");
     let opportunity = engine
         .view("opportunity")
         .expect("Should have opportunity view");
@@ -589,7 +589,7 @@ fn lookml_sales_yesno_dimensions() {
 
 #[test]
 fn lookml_sales_filtered_measure() {
-    let engine = load_lookml_engine("sales");
+    let engine = load_lookml_engine("sales-lookml");
     let opportunity = engine
         .view("opportunity")
         .expect("Should have opportunity view");
@@ -613,7 +613,7 @@ fn lookml_sales_filtered_measure() {
 
 #[test]
 fn lookml_sales_explore_joins() {
-    let engine = load_lookml_engine("sales");
+    let engine = load_lookml_engine("sales-lookml");
     let opportunity = engine
         .view("opportunity")
         .expect("Should have opportunity view");
@@ -632,7 +632,7 @@ fn lookml_sales_explore_joins() {
 
 #[test]
 fn lookml_sales_compile_pipeline_query() {
-    let engine = load_lookml_engine("sales");
+    let engine = load_lookml_engine("sales-lookml");
 
     let request = QueryRequest {
         measures: vec![
@@ -651,7 +651,7 @@ fn lookml_sales_compile_pipeline_query() {
 
 #[test]
 fn lookml_sales_compile_cross_view_query() {
-    let engine = load_lookml_engine("sales");
+    let engine = load_lookml_engine("sales-lookml");
 
     let request = QueryRequest {
         measures: vec!["opportunity.total_amount".to_string()],
@@ -673,7 +673,7 @@ fn lookml_sales_compile_cross_view_query() {
 
 #[test]
 fn lookml_jira_sql_structure_correctness() {
-    let engine = load_lookml_engine("jira");
+    let engine = load_lookml_engine("jira-lookml");
 
     // Simple count by status
     let request = QueryRequest {
@@ -699,7 +699,7 @@ fn lookml_jira_sql_structure_correctness() {
 
 #[test]
 fn lookml_healthcare_sql_join_correctness() {
-    let engine = load_lookml_engine("healthcare");
+    let engine = load_lookml_engine("healthcare-lookml");
 
     let request = QueryRequest {
         measures: vec![
@@ -731,7 +731,7 @@ fn lookml_healthcare_sql_join_correctness() {
 
 #[test]
 fn lookml_google_ads_sql_number_measure() {
-    let engine = load_lookml_engine("google_ads");
+    let engine = load_lookml_engine("google-ads-lookml");
 
     // average_click_rate is type: number with sql referencing other measures
     let request = QueryRequest {
@@ -754,7 +754,7 @@ fn lookml_google_ads_sql_number_measure() {
 
 #[test]
 fn lookml_bulk_compile_all_views() {
-    let fixtures = vec!["jira", "google_ads", "healthcare", "sales"];
+    let fixtures = vec!["jira-lookml", "google-ads-lookml", "healthcare-lookml", "sales-lookml"];
     let mut total_views = 0;
     let mut total_queries = 0;
 
@@ -821,7 +821,7 @@ fn lookml_sql_quality_check() {
     let test_cases: Vec<(&str, QueryRequest, Vec<&str>)> = vec![
         // (fixture, query, expected_sql_fragments)
         (
-            "healthcare",
+            "healthcare-lookml",
             QueryRequest {
                 measures: vec![
                     "encounter.count".to_string(),
@@ -840,7 +840,7 @@ fn lookml_sql_quality_check() {
             ],
         ),
         (
-            "jira",
+            "jira-lookml",
             QueryRequest {
                 measures: vec!["issue.count".to_string()],
                 dimensions: vec!["priority.name".to_string()],
@@ -849,7 +849,7 @@ fn lookml_sql_quality_check() {
             vec!["SELECT", "COUNT", "JOIN", "GROUP BY"],
         ),
         (
-            "sales",
+            "sales-lookml",
             QueryRequest {
                 measures: vec!["opportunity.total_amount".to_string()],
                 dimensions: vec!["account.industry".to_string()],
@@ -858,7 +858,7 @@ fn lookml_sql_quality_check() {
             vec!["SELECT", "SUM", "JOIN", "GROUP BY", "industry"],
         ),
         (
-            "google_ads",
+            "google-ads-lookml",
             QueryRequest {
                 measures: vec![
                     "ad_impressions.total_impressions".to_string(),
@@ -890,7 +890,7 @@ fn lookml_sql_quality_check() {
 /// Test that the SQL produced for a 2-view cross-entity join has proper structure.
 #[test]
 fn lookml_sql_join_structure() {
-    let engine = load_lookml_engine("healthcare");
+    let engine = load_lookml_engine("healthcare-lookml");
 
     // 2-view join: encounter → patient
     let request = QueryRequest {
