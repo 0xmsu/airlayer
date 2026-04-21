@@ -1,7 +1,7 @@
+pub mod contrib;
 pub mod dialect;
 pub mod engine;
 pub mod schema;
-pub mod contrib;
 
 #[cfg(feature = "cli")]
 pub mod cli;

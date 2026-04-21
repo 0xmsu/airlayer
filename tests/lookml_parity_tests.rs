@@ -754,7 +754,12 @@ fn lookml_google_ads_sql_number_measure() {
 
 #[test]
 fn lookml_bulk_compile_all_views() {
-    let fixtures = vec!["jira-lookml", "google-ads-lookml", "healthcare-lookml", "sales-lookml"];
+    let fixtures = vec![
+        "jira-lookml",
+        "google-ads-lookml",
+        "healthcare-lookml",
+        "sales-lookml",
+    ];
     let mut total_views = 0;
     let mut total_queries = 0;
 

@@ -114,7 +114,10 @@ expect:
         assert_eq!(manifest.format, ForeignFormat::Cube);
         assert_eq!(manifest.known_issues.len(), 2);
         assert_eq!(manifest.expect.sample_queries.len(), 1);
-        assert_eq!(manifest.expect.sample_queries[0].measures, vec!["orders.count"]);
+        assert_eq!(
+            manifest.expect.sample_queries[0].measures,
+            vec!["orders.count"]
+        );
     }
 
     #[test]

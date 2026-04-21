@@ -83,7 +83,9 @@ fn contrib_repos_parse_and_validate() {
             if has_known_issues {
                 eprintln!(
                     "[{}] WARN: expected >= {} views, got {} (known issues)",
-                    repo_name, manifest.expect.views_min, result.views.len()
+                    repo_name,
+                    manifest.expect.views_min,
+                    result.views.len()
                 );
                 warned_repos.push(repo_name.to_string());
                 total_repos += 1;
@@ -139,10 +141,7 @@ fn contrib_repos_parse_and_validate() {
                             repo_name, i, e
                         );
                     } else {
-                        panic!(
-                            "[{}] sample_query[{}] failed: {}",
-                            repo_name, i, e
-                        );
+                        panic!("[{}] sample_query[{}] failed: {}", repo_name, i, e);
                     }
                 }
             }
