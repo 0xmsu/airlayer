@@ -613,17 +613,43 @@ fn render_filter_sql(
     }
 }
 
-/// Build a WHERE clause from request filters for re-aggregation queries.
+/// Build a WHERE clause from request filters AND time_dimension date_ranges
+/// for re-aggregation queries.
 fn build_reagg_where_clause(
     request: &crate::engine::query::QueryRequest,
     entry: &LocalRollupEntry,
     quote: &dyn Fn(&str) -> String,
 ) -> String {
-    let parts: Vec<String> = request
+    let mut parts: Vec<String> = request
         .filters
         .iter()
         .filter_map(|f| render_filter_sql(f, entry, quote))
         .collect();
+
+    // Add date_range filters from time_dimensions
+    for td in &request.time_dimensions {
+        if let Some(ref date_range) = td.date_range {
+            if date_range.len() == 2 {
+                let td_name = td.dimension.split('.').nth(1).unwrap_or(&td.dimension);
+                let col = if let Some(ref stored_gran) = entry.granularity {
+                    quote(&format!("{}__{}", td_name, stored_gran))
+                } else {
+                    quote(td_name)
+                };
+                parts.push(format!(
+                    "{} >= '{}'",
+                    col,
+                    date_range[0].replace('\'', "''")
+                ));
+                parts.push(format!(
+                    "{} <= '{}'",
+                    col,
+                    date_range[1].replace('\'', "''")
+                ));
+            }
+        }
+    }
+
     if parts.is_empty() {
         String::new()
     } else {
@@ -776,11 +802,9 @@ pub fn generate_reagg_sql(
                     group_by_cols.push(trunc);
                 }
             }
-        } else {
-            // No requested granularity: use the stored truncated column if available,
-            // otherwise fall back to the bare dimension name.
-            // The rollup never stores a raw time column — only the truncated form
-            // (e.g., `created_at__month`), so prefer that when present.
+        } else if td.date_range.is_none() {
+            // No requested granularity AND no date_range filter: include time
+            // column in the output (pass-through).
             let col = if let Some(ref stored_gran) = entry.granularity {
                 format!("\"{}__{stored_gran}\"", td_name)
             } else {
@@ -789,6 +813,8 @@ pub fn generate_reagg_sql(
             select_cols.push(format!("{} AS \"{}\"", col, alias));
             group_by_cols.push(col);
         }
+        // else: has date_range but no granularity → filter-only (handled by
+        // build_reagg_where_clause), don't add time column to SELECT/GROUP BY
     }
 
     // 3. Measures (re-aggregated)
@@ -1221,6 +1247,12 @@ pub fn parse_manifest_rows(
 ) -> Vec<WarehouseRollupEntry> {
     rows.iter()
         .filter_map(|row| {
+            // Normalize keys to lowercase so parsing works with databases that
+            // uppercase unquoted identifiers (e.g. Snowflake returns VIEW_NAME).
+            let row: serde_json::Map<String, serde_json::Value> = row
+                .iter()
+                .map(|(k, v)| (k.to_lowercase(), v.clone()))
+                .collect();
             Some(WarehouseRollupEntry {
                 view_name: row.get("view_name")?.as_str()?.to_string(),
                 rollup_name: row.get("rollup_name")?.as_str()?.to_string(),
@@ -3058,6 +3090,30 @@ mod tests {
         assert_eq!(entries[0].dimensions, vec!["platform"]);
         assert_eq!(entries[0].time_dimension.as_deref(), Some("created_at"));
         assert_eq!(entries[0].granularity.as_deref(), Some("day"));
+    }
+
+    #[test]
+    fn test_parse_manifest_rows_uppercase_keys() {
+        // Snowflake returns uppercase column names for unquoted identifiers
+        let rows = vec![serde_json::json!({
+            "VIEW_NAME": "events",
+            "ROLLUP_NAME": "by_platform",
+            "ROLLUP_HASH": "abc123",
+            "TABLE_NAME": "AIRLAYER.events__abc123__20260415",
+            "DIMENSIONS": "[\"platform\"]",
+            "MEASURES": "[{\"name\":\"count\",\"type\":\"count\",\"columns\":[\"count__count\"]}]",
+            "TIME_DIMENSION": "created_at",
+            "GRANULARITY": "day",
+            "BUILD_DATE": "2026-04-15"
+        })
+        .as_object()
+        .unwrap()
+        .clone()];
+
+        let entries = parse_manifest_rows(&rows);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].view_name, "events");
+        assert_eq!(entries[0].table_name, "AIRLAYER.events__abc123__20260415");
     }
 
     #[test]
