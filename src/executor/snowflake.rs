@@ -297,9 +297,7 @@ fn coerce_snowflake_value(val: &JsonValue, row_type: Option<&JsonValue>) -> Json
                 if let Ok(secs) = s.parse::<f64>() {
                     let epoch = chrono::NaiveDateTime::from_timestamp_opt(secs as i64, 0);
                     if let Some(dt) = epoch {
-                        return JsonValue::String(
-                            dt.format("%Y-%m-%dT%H:%M:%S").to_string(),
-                        );
+                        return JsonValue::String(dt.format("%Y-%m-%dT%H:%M:%S").to_string());
                     }
                 }
             }

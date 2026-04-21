@@ -2128,7 +2128,12 @@ fn run_execute(
                                         // Get columns after execution (DuckDB 1.x panics if called before)
                                         let columns: Vec<String> = duckdb_rows
                                             .as_ref()
-                                            .map(|r| r.column_names().iter().map(|s| s.to_string()).collect())
+                                            .map(|r| {
+                                                r.column_names()
+                                                    .iter()
+                                                    .map(|s| s.to_string())
+                                                    .collect()
+                                            })
                                             .unwrap_or_default();
                                         let mut rows = Vec::new();
                                         loop {
