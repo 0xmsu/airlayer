@@ -104,13 +104,13 @@ fmt:
 
 # Build WASM package for web (output in pkg/)
 build-wasm:
-    wasm-pack build --target web -- --no-default-features --features wasm
+    wasm-pack build --target web -- --no-default-features --features wasm,foreign
     wasm-opt -Oz --enable-bulk-memory --enable-nontrapping-float-to-int pkg/airlayer_bg.wasm -o pkg/airlayer_bg.wasm.opt && mv pkg/airlayer_bg.wasm.opt pkg/airlayer_bg.wasm
     cp wasm-readme.md pkg/README.md
 
 # Build WASM package for Node.js (output in pkg/)
 build-wasm-node:
-    wasm-pack build --target nodejs -- --no-default-features --features wasm
+    wasm-pack build --target nodejs -- --no-default-features --features wasm,foreign
     wasm-opt -Oz --enable-bulk-memory --enable-nontrapping-float-to-int pkg/airlayer_bg.wasm -o pkg/airlayer_bg.wasm.opt && mv pkg/airlayer_bg.wasm.opt pkg/airlayer_bg.wasm
     cp wasm-readme.md pkg/README.md
 
