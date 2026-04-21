@@ -295,9 +295,10 @@ fn coerce_snowflake_value(val: &JsonValue, row_type: Option<&JsonValue>) -> Json
             "timestamp_ltz" | "timestamp_ntz" | "timestamp_tz" => {
                 // Snowflake REST API returns timestamps as epoch seconds (with fractional)
                 if let Ok(secs) = s.parse::<f64>() {
-                    let epoch = chrono::NaiveDateTime::from_timestamp_opt(secs as i64, 0);
-                    if let Some(dt) = epoch {
-                        return JsonValue::String(dt.format("%Y-%m-%dT%H:%M:%S").to_string());
+                    if let Some(dt) = chrono::DateTime::from_timestamp(secs as i64, 0) {
+                        return JsonValue::String(
+                            dt.naive_utc().format("%Y-%m-%dT%H:%M:%S").to_string(),
+                        );
                     }
                 }
             }
