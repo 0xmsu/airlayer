@@ -3,11 +3,11 @@
 //! Provides a JS-friendly API for compiling semantic queries to SQL,
 //! and pre-aggregation cache management via IndexedDB.
 //!
-//! Build with:
-//!   wasm-pack build --target web --no-default-features --features wasm
+//! Build with (includes foreign model support):
+//!   wasm-pack build --target web --no-default-features --features wasm,foreign
 //!
-//! With foreign model support (e.g., LookML):
-//!   wasm-pack build --target web --no-default-features --features wasm,foreign-lookml
+//! For a minimal build without foreign parsers:
+//!   wasm-pack build --target web --no-default-features --features wasm
 
 use wasm_bindgen::prelude::*;
 
