@@ -41,10 +41,11 @@
   .badge-raw { background: #7c2d12; color: #fdba74; }
   .card-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: .5rem; }
   .card-header h2 { margin-bottom: 0; }
-  .cost { font-size: .9rem; font-weight: 700; }
+  .cost { font-size: 1.6rem; font-weight: 700; position: relative; cursor: default; }
   .cost-cached { color: #34d399; }
   .cost-raw { color: #fb923c; }
-  .meta-row { display: flex; gap: 1.5rem; font-size: .8rem; color: #64748b; margin-bottom: 1rem; }
+  .cost-detail { font-size: .75rem; font-weight: 400; color: #94a3b8; margin-top: 4px; line-height: 1.4; }
+  .meta-row { display: flex; gap: 1.5rem; font-size: 1rem; color: #64748b; margin-bottom: 1rem; }
   .meta-row span { font-weight: 600; }
   .meta-row .cached-val { color: #34d399; }
   .meta-row .raw-val { color: #fb923c; }
@@ -77,21 +78,16 @@
     <div class="sim-header">Cost simulation</div>
     <div class="sim-row">
       <label>Users/day</label>
-      <input type="range" id="users-slider" min="0" max="30" value="0" />
-      <div class="sim-val" id="users-value">1</div>
-    </div>
-    <div class="sim-row">
-      <label>Queries/day</label>
-      <input type="range" id="queries-slider" min="1" max="100" value="20" />
-      <div class="sim-val" id="queries-value">20</div>
+      <input type="range" id="users-slider" min="0" max="30" value="20" />
+      <div class="sim-val" id="users-value">100</div>
     </div>
     <div class="sim-row">
       <label>Warehouse</label>
       <select id="warehouse-select">
-        <option value="1" selected>XS (1 credit/hr)</option>
+        <option value="1">XS (1 credit/hr)</option>
         <option value="2">S (2 credits/hr)</option>
         <option value="4">M (4 credits/hr)</option>
-        <option value="8">L (8 credits/hr)</option>
+        <option value="8" selected>L (8 credits/hr)</option>
         <option value="16">XL (16 credits/hr)</option>
       </select>
     </div>
@@ -113,6 +109,7 @@
       <h2><span class="badge badge-cached">PRECOMPUTED</span> Airlayer + DuckDB</h2>
       <div class="cost cost-cached" id="cached-cost">$0.00</div>
     </div>
+    <div class="cost-detail" style="color:#6ee7b7">Pre-aggregated — zero warehouse cost</div>
     <div class="meta-row">
       <div>Latency: <span class="cached-val" id="cached-timing">&mdash;</span></div>
       <div>Queries: <span class="cached-val" id="cached-queries">0</span></div>
@@ -125,6 +122,7 @@
       <h2><span class="badge badge-raw">RAW</span> Snowflake Direct</h2>
       <div class="cost cost-raw" id="raw-cost">$0.00</div>
     </div>
+    <div class="cost-detail" id="raw-cost-detail">Drag slider to see projected cost</div>
     <div class="meta-row">
       <div>Latency: <span class="raw-val" id="raw-timing">&mdash;</span></div>
       <div>Queries: <span class="raw-val" id="raw-queries">0</span></div>
@@ -141,7 +139,6 @@ const MONTHS = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov
 const initStatus = document.getElementById('init-status');
 const monthSlider = document.getElementById('month-slider');
 const usersSlider = document.getElementById('users-slider');
-const queriesSlider = document.getElementById('queries-slider');
 const warehouseSelect = document.getElementById('warehouse-select');
 
 let viewYaml = '';
@@ -158,37 +155,49 @@ function getCreditsPerHour() {
 }
 
 // ── Cost tracking ────────────────────────────────────────────────────────────
-// Snowflake per-second billing:
-//   cost per query = (seconds/query) / 3600 × credits/hour × $/credit
-// Accumulated across all queries × simulated user count.
-// Annual projection = accumulated cost per query × queries/user/day × 365
+// Snowflake per-second billing — projection formula:
+//   Annual = users × queries/user/day × effective_seconds/query / 3600
+//            × credits/hr × $/credit × 365
+//
+// "effective_seconds" = max(observed_latency, 60s) — Snowflake's 60-second
+// minimum billing per cluster start means short queries still cost ≥1 min.
+//
+// Real-world Snowflake embedded analytics tiers (1000 DAU):
+//   Low (optimized):  $35k – $60k/yr
+//   Medium (typical):  $120k – $250k/yr
+//   High (no caching): $300k – $1M+/yr
 const COST_PER_CREDIT = 2;
+const MIN_BILLING_SECONDS = 60;  // Snowflake minimum per credit consumption
 
-// Running totals: each Snowflake query adds its cost (latency-based × users)
-let accumulatedComputeSeconds = 0;  // total compute seconds (latency × users)
+// Track actual demo queries (1 per slider drag) — independent of user slider
+let demoQueryCount = 0;
+let totalDemoLatencyMs = 0;
 let cachedQueryCount = 0;
-let rawQueryCount = 0;
 
-function addQueryCost(latencyMs) {
-  const users = getUserCount();
-  accumulatedComputeSeconds += (latencyMs / 1000) * users;
+function addDemoQuery(latencyMs) {
+  demoQueryCount++;
+  totalDemoLatencyMs += latencyMs;
 }
 
-// Annual projection: extrapolate from per-query cost observed so far
+function getAvgLatencyS() {
+  return demoQueryCount > 0 ? totalDemoLatencyMs / demoQueryCount / 1000 : 1;
+}
+
+// Projection uses CURRENT slider values + observed avg latency
 function projectedAnnualCost() {
-  if (rawQueryCount === 0) return 0;
-  const avgSecondsPerQuery = accumulatedComputeSeconds / rawQueryCount;
+  if (demoQueryCount === 0) return 0;
   const users = getUserCount();
-  const queriesPerDay = Number(document.getElementById('queries-slider').value);
+  const queriesPerDay = demoQueryCount;  // session queries = one user's daily pattern
+  const effectiveS = Math.max(getAvgLatencyS(), MIN_BILLING_SECONDS);
   const creditsPerHour = getCreditsPerHour();
-  const computeHoursPerDay = (users * queriesPerDay * avgSecondsPerQuery) / 3600;
-  return computeHoursPerDay * creditsPerHour * COST_PER_CREDIT * 365;
+  return (users * queriesPerDay * effectiveS) / 3600 * creditsPerHour * COST_PER_CREDIT * 365;
 }
 
-function formatAnnualCost(cost) {
-  if (cost >= 1e6) return `$${(cost / 1e6).toFixed(1)}M/yr`;
-  if (cost >= 1e3) return `$${(cost / 1e3).toFixed(0)}k/yr`;
-  return `$${cost.toFixed(0)}/yr`;
+function formatCost(cost) {
+  if (cost >= 1e6) return `$${(cost / 1e6).toFixed(1)}M`;
+  if (cost >= 1e3) return `$${(cost / 1e3).toFixed(1)}k`;
+  if (cost >= 1) return `$${cost.toFixed(0)}`;
+  return `$${cost.toFixed(2)}`;
 }
 
 function formatMs(ms) {
@@ -199,10 +208,25 @@ function formatMs(ms) {
 
 function updateCostDisplay() {
   const annual = projectedAnnualCost();
-  document.getElementById('cached-cost').textContent = '$0/yr';
-  document.getElementById('raw-cost').textContent = rawQueryCount > 0 ? formatAnnualCost(annual) : '$0/yr';
-  document.getElementById('cached-queries').textContent = cachedQueryCount.toLocaleString();
-  document.getElementById('raw-queries').textContent = rawQueryCount.toLocaleString();
+  const users = getUserCount();
+  const creditsPerHour = getCreditsPerHour();
+  const totalQueries = demoQueryCount * users;
+
+  document.getElementById('cached-cost').textContent = '$0.00';
+  document.getElementById('raw-cost').textContent = demoQueryCount > 0 ? `${formatCost(annual)}/yr` : '$0.00';
+
+  const detail = document.getElementById('raw-cost-detail');
+  if (demoQueryCount > 0) {
+    detail.textContent =
+      `Estimating cost as if your current usage is representative of a ` +
+      `standard user. Assuming ${users.toLocaleString()} users, running ` +
+      `${demoQueryCount} queries a day.`;
+  } else {
+    detail.textContent = 'Drag slider to see projected cost';
+  }
+
+  document.getElementById('cached-queries').textContent = (cachedQueryCount * users).toLocaleString();
+  document.getElementById('raw-queries').textContent = totalQueries.toLocaleString();
 }
 
 // ── Initialize ───────────────────────────────────────────────────────────────
@@ -307,8 +331,7 @@ async function runCached(endMonth) {
       return obj;
     });
 
-    const users = getUserCount();
-    cachedQueryCount += users;
+    cachedQueryCount++;
     updateCostDisplay();
 
     return { rows, elapsed };
@@ -348,9 +371,7 @@ async function runRaw(endMonth) {
     document.getElementById('raw-loading').classList.remove('visible');
     if (result.error) { console.error(result.error); return; }
 
-    const users = getUserCount();
-    rawQueryCount += users;
-    addQueryCost(elapsed);
+    addDemoQuery(elapsed);
     updateCostDisplay();
 
     renderBars('raw-bars', result.rows, 'bar-fill-raw');
@@ -418,13 +439,11 @@ function onDateChange(month) {
 
 function onSimChange() {
   document.getElementById('users-value').textContent = getUserCount().toLocaleString();
-  document.getElementById('queries-value').textContent = queriesSlider.value;
   updateCostDisplay();
 }
 
 monthSlider.addEventListener('input', (e) => onDateChange(Number(e.target.value)));
 usersSlider.addEventListener('input', onSimChange);
-queriesSlider.addEventListener('input', onSimChange);
 warehouseSelect.addEventListener('change', onSimChange);
 
 initialize();
