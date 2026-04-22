@@ -6479,10 +6479,7 @@ mod tests {
             gen.quote_table_name("main.20250816_tamalpa_headlands_50k"),
             r#"main."20250816_tamalpa_headlands_50k""#
         );
-        assert_eq!(
-            gen.quote_table_name("20250816_foo"),
-            r#""20250816_foo""#
-        );
+        assert_eq!(gen.quote_table_name("20250816_foo"), r#""20250816_foo""#);
     }
 
     #[test]
