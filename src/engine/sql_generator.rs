@@ -2005,7 +2005,11 @@ impl<'a> SqlGenerator<'a> {
         if table.starts_with('"') || table.starts_with('`') {
             return table.to_string();
         }
-        let needs_quoting = |s: &str| s.chars().any(|c| !c.is_alphanumeric() && c != '_');
+        let needs_quoting = |s: &str| {
+            s.is_empty()
+                || s.chars().next().is_some_and(|c| c.is_ascii_digit())
+                || s.chars().any(|c| !c.is_alphanumeric() && c != '_')
+        };
         let parts: Vec<&str> = table.split('.').collect();
         parts
             .iter()
@@ -6464,5 +6468,48 @@ mod tests {
             "Backtick-quoted identifier should be qualified. Got:\n{}",
             result.sql
         );
+    }
+
+    #[test]
+    fn quotes_table_segments_starting_with_digit() {
+        let (eval, jg, layer) = make_test_engine();
+        let dialect = Dialect::DuckDB;
+        let gen = SqlGenerator::new(&eval, &jg, &dialect, &layer);
+        assert_eq!(
+            gen.quote_table_name("main.20250816_tamalpa_headlands_50k"),
+            r#"main."20250816_tamalpa_headlands_50k""#
+        );
+        assert_eq!(
+            gen.quote_table_name("20250816_foo"),
+            r#""20250816_foo""#
+        );
+    }
+
+    #[test]
+    fn leaves_plain_identifiers_unquoted() {
+        let (eval, jg, layer) = make_test_engine();
+        let dialect = Dialect::DuckDB;
+        let gen = SqlGenerator::new(&eval, &jg, &dialect, &layer);
+        assert_eq!(gen.quote_table_name("main.oxymart"), "main.oxymart");
+    }
+
+    #[test]
+    fn still_passes_through_prequoted_values() {
+        let (eval, jg, layer) = make_test_engine();
+        let dialect = Dialect::DuckDB;
+        let gen = SqlGenerator::new(&eval, &jg, &dialect, &layer);
+        assert_eq!(
+            gen.quote_table_name(r#""main"."already_quoted""#),
+            r#""main"."already_quoted""#
+        );
+    }
+
+    #[test]
+    fn quotes_snowflake_identifier_with_leading_digit_uppercased() {
+        let (eval, jg, layer) = make_test_engine();
+        let dialect = Dialect::Snowflake;
+        let gen = SqlGenerator::new(&eval, &jg, &dialect, &layer);
+        // Snowflake's quote_identifier uppercases the content.
+        assert_eq!(gen.quote_table_name("20250816_foo"), r#""20250816_FOO""#);
     }
 }
