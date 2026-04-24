@@ -2049,9 +2049,13 @@ fn parse_window_interval(s: &str) -> String {
 }
 
 /// Check if an expression is a simple column name (no operators, functions, etc.).
+/// Also matches column names with spaces (e.g. "Day of Week") which need quoting.
 fn is_simple_column_name(expr: &str) -> bool {
     let trimmed = expr.trim();
-    !trimmed.is_empty() && trimmed.chars().all(|c| c.is_alphanumeric() || c == '_')
+    !trimmed.is_empty()
+        && trimmed
+            .chars()
+            .all(|c| c.is_alphanumeric() || c == '_' || c == ' ')
 }
 
 #[cfg(test)]
@@ -2149,6 +2153,32 @@ mod tests {
                             dimension_type: DimensionType::Number,
                             description: None,
                             expr: "amount".to_string(),
+                            original_expr: None,
+                            samples: None,
+                            synonyms: None,
+                            primary_key: None,
+                            sub_query: None,
+                            inherits_from: None,
+                            meta: None,
+                        },
+                        Dimension {
+                            name: "day_of_week".to_string(),
+                            dimension_type: DimensionType::String,
+                            description: None,
+                            expr: "Day of Week".to_string(),
+                            original_expr: None,
+                            samples: None,
+                            synonyms: None,
+                            primary_key: None,
+                            sub_query: None,
+                            inherits_from: None,
+                            meta: None,
+                        },
+                        Dimension {
+                            name: "published_language".to_string(),
+                            dimension_type: DimensionType::String,
+                            description: None,
+                            expr: "\"Published Language\"".to_string(),
                             original_expr: None,
                             samples: None,
                             synonyms: None,
@@ -2285,6 +2315,58 @@ mod tests {
         assert!(result.sql.contains("status"));
         assert!(result.sql.contains("GROUP BY"));
         assert_eq!(result.columns.len(), 2);
+    }
+
+    #[test]
+    fn test_column_name_with_spaces() {
+        let (eval, jg, layer) = make_test_engine();
+        let dialect = Dialect::Postgres;
+        let gen = SqlGenerator::new(&eval, &jg, &dialect, &layer);
+
+        let request = QueryRequest {
+            dimensions: vec!["orders.day_of_week".to_string()],
+            ..QueryRequest::new()
+        };
+
+        let result = gen.generate(&request).unwrap();
+        // Column name with spaces must be quoted
+        assert!(
+            result.sql.contains("\"Day of Week\""),
+            "Expected quoted column name, got: {}",
+            result.sql
+        );
+    }
+
+    #[test]
+    fn test_column_name_with_spaces_is_simple() {
+        assert!(is_simple_column_name("Day of Week"));
+        assert!(is_simple_column_name("status"));
+        assert!(!is_simple_column_name("a + b"));
+        assert!(!is_simple_column_name("COALESCE(x, y)"));
+        assert!(!is_simple_column_name(""));
+        // Explicitly quoted column names (e.g. expr: '"Published Language"') are NOT simple —
+        // they contain quote chars and go through the qualify_bare_columns path instead.
+        assert!(!is_simple_column_name("\"Published Language\""));
+    }
+
+    #[test]
+    fn test_explicitly_quoted_column_name() {
+        let (eval, jg, layer) = make_test_engine();
+        let dialect = Dialect::Postgres;
+        let gen = SqlGenerator::new(&eval, &jg, &dialect, &layer);
+
+        let request = QueryRequest {
+            dimensions: vec!["orders.published_language".to_string()],
+            ..QueryRequest::new()
+        };
+
+        let result = gen.generate(&request).unwrap();
+        // Explicitly quoted expr should be qualified with view alias
+        assert!(
+            result.sql.contains("\"orders\".\"Published Language\""),
+            "Expected qualified quoted column, got: {}",
+            result.sql
+        );
     }
 
     #[test]
